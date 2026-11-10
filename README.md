@@ -46,6 +46,7 @@
 - 👀 **Looks like an open tab.** Loads the pack page before playing, keeps the site's device cookies, and sends the same presence heartbeat as the web app.
 - 🛑 **Safety stop.** If the site answers anything unexpected (a block page, an unknown error), the tool stops and alerts you instead of insisting.
 - 🔄 **Self-renewing session.** Paste your cookie once. The access token is refreshed automatically from then on.
+- 📅 **Daily login streak.** Claims the daily login reward at the first session of the day, the same way the site's pages do when they load.
 - 🔔 **Discord notifications.** Legendary and mythic pulls with the card art, a daily recap, and an alert if the tool stops.
 
 ## 📋 Requirements
@@ -198,6 +199,8 @@ Your regular browser has its own login, so you can keep playing there. `oshibot 
 ## ⚙️ How it works
 
 The web app opens a pack with a single `POST /api/open` call, authenticated by a Supabase session cookie. The tool rebuilds that cookie from a stored session, renews the access token through the Supabase auth API when it is about to expire, and replays the same call with a fresh `requestId` each time.
+
+The daily login reward is a Next.js server action that the site's pages call when they load. Its id changes with every site update, so `oshibot` reads it from the page's scripts and caches it until the site changes. Set `DAILY_LOGIN=0` in the profile to turn this off.
 
 ## 📄 License
 

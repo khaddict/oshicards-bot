@@ -37,6 +37,7 @@ SLUG="standard"
 CURL_BIN="curl"
 DAILY_RECAP=1
 USE_BONUS=1
+DAILY_LOGIN=1
 GAP_MIN=90; GAP_MAX=180
 SKIP_CHANCE=10; SKIP_EXTRA_MIN=45; SKIP_EXTRA_MAX=90
 LIGHT_DAY_CHANCE=10; PARTIAL_CHANCE=10
@@ -174,6 +175,8 @@ SLUG=$SLUG
 DAILY_RECAP=$DAILY_RECAP
 # also open bonus boosters (quest rewards), once the free stock is empty
 USE_BONUS=$USE_BONUS
+# claim the daily login reward, as the site does from every page it loads
+DAILY_LOGIN=$DAILY_LOGIN
 CURL_BIN=$CURL_BIN
 EOF
 }
@@ -363,16 +366,67 @@ cookie_header() {
 }
 
 PAGE_CODE=000
+PAGE_HTML=""
 visit_page() {
   local hdr
   hdr=$(mktemp)
+  PAGE_HTML=$(mktemp)
   PAGE_CODE=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H "$(cookie_header)" \
     -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8' \
     -H 'sec-fetch-dest: document' -H 'sec-fetch-mode: navigate' -H 'sec-fetch-site: none' \
     -H 'upgrade-insecure-requests: 1' --compressed \
-    -D "$hdr" -o /dev/null -w '%{http_code}' "$SITE/$LOCALE/open/$SLUG" 2>/dev/null) || PAGE_CODE=000
+    -D "$hdr" -o "$PAGE_HTML" -w '%{http_code}' "$SITE/$LOCALE/open/$SLUG" 2>/dev/null) || PAGE_CODE=000
   [[ $PAGE_CODE == 200 ]] && save_site_cookies "$hdr"
   rm -f "$hdr"
+}
+
+# The site's pages claim the daily login reward by themselves when they load.
+# Its action id changes with every site update, so it is read from the page's scripts.
+daily_login() {
+  local html=$1 id chunk url found out line bonus
+  (( DAILY_LOGIN )) || return 0
+  id=$(state_get CLAIM_ID "")
+  chunk=$(state_get CLAIM_CHUNK "")
+  if [[ -z $id || -z $chunk ]] || ! grep -qF "$chunk" "$html"; then
+    id=""
+    for url in $(grep -oE '/_next/static/[^"\\ ?]+\.js(\?dpl=[A-Za-z0-9_.-]+)?' "$html" | sort -u); do
+      found=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H 'Accept: */*' -H "Referer: $SITE/$LOCALE/open/$SLUG" \
+        -H 'sec-fetch-dest: script' -H 'sec-fetch-mode: no-cors' -H 'sec-fetch-site: same-origin' --compressed \
+        "$SITE$url" 2>/dev/null |
+        grep -oE '"[0-9a-f]{42}",[A-Za-z_$]+\.callServer,void 0,[A-Za-z_$]+\.findSourceMapURL,"claimDailyLogin"' | head -1)
+      if [[ -n $found ]]; then
+        id=${found:1:42}; chunk=${url%%\?*}
+        break
+      fi
+    done
+    if [[ -z $id ]]; then
+      warn "daily login: not found in the site's code, skipped"; return 0
+    fi
+    state_set CLAIM_ID "$id"; state_set CLAIM_CHUNK "$chunk"
+  fi
+  if ! out=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H "$(cookie_header)" -H 'Accept: text/x-component' \
+      -H 'Content-Type: text/plain;charset=UTF-8' -H "Next-Action: $id" \
+      -H "Origin: $SITE" -H "Referer: $SITE/$LOCALE/open/$SLUG" \
+      -H 'sec-fetch-dest: empty' -H 'sec-fetch-mode: cors' -H 'sec-fetch-site: same-origin' --compressed \
+      -d '[]' -w $'\n%{http_code}' "$SITE/$LOCALE/open/$SLUG" 2>/dev/null); then
+    return 0
+  fi
+  if [[ ${out##*$'\n'} != 200 ]]; then
+    state_set CLAIM_ID ""
+    warn "daily login: the site answered HTTP ${out##*$'\n'}, skipped"; return 0
+  fi
+  line=$(grep -m1 '^1:{' <<<"$out" | cut -c3-)
+  jq -e '.day' >/dev/null 2>&1 <<<"$line" || return 0
+  state_set LOGIN_DAY "$(jq -r '"\(.day)/\(.cycle // 7)"' <<<"$line")"
+  if [[ $(jq -r '.claimed' <<<"$line") == true ]]; then
+    ok "daily login claimed: day $(state_get LOGIN_DAY "?")"
+  fi
+  if [[ $(jq -r '.claimed or (.state.login_claimed_today // false)' <<<"$line") == true ]]; then
+    state_set LOGIN_DATE "$(date -d "@$(now)" +%F)"
+  fi
+  bonus=$(jq -r '.state.bonus_boosters // empty' <<<"$line")
+  [[ $bonus =~ ^[0-9]+$ ]] && state_set BONUS "$bonus"
+  return 0
 }
 
 LAST_PING=0
@@ -505,6 +559,11 @@ play_session() {
   (( rc == 1 )) && { warn "network unavailable, session postponed"; return 0; }
 
   visit_page
+  if [[ $PAGE_CODE == 200 ]]; then
+    idle "$(rand 1 3)"
+    daily_login "$PAGE_HTML"
+  fi
+  rm -f "$PAGE_HTML"
   case $PAGE_CODE in
     200) state_set PAGE_FAILS 0 ;;
     403 | 429) halt "the pack page answered HTTP $PAGE_CODE, the site may be blocking this tool"; return 3 ;;
@@ -924,6 +983,7 @@ cmd_status() {
   echo "Browser : $(has_browser && echo "${GRN}$(jq -r '.browser.ua' "$DEVICE" | grep -oE '(Chrome|Firefox|Version)/[0-9]+' | tail -1)${R}, language $(jq -r .browser.accept_language "$DEVICE")" || echo "${YEL}generic${R} (run: oshibot browser)")"
   echo "Profile : $([[ -n $PRESET ]] && echo "${GRN}$PRESET${R}, sessions every $GAP_MIN to $GAP_MAX min (details: oshibot profile)" || echo "${YEL}not drawn yet${R} (run: oshibot profile <chill|regular|grinder|nonstop>)")"
   echo "Stock   : $([[ -n $(state_get FREE_MAX "") ]] && echo "up to $(max_packs) free boosters, one every $(regen_minutes) min, $(state_get BONUS 0) bonus left (read from your account)" || echo "not known yet, read from the site at the first opening")"
+  echo "Login   : $([[ -n $(state_get LOGIN_DAY "") ]] && echo "streak day $(state_get LOGIN_DAY ""), $([[ $(state_get LOGIN_DATE "") == "$(date +%F)" ]] && echo "${GRN}claimed today${R}" || echo "not claimed yet today")" || echo "not known yet")"
   echo "Webhook : $([[ -n $WEBHOOK ]] && echo "${GRN}configured${R}" || echo "${YEL}not configured${R} (run: oshibot webhook <url>)")"
   if [[ -f $UNIT ]]; then
     echo "Service : $(systemctl is-active "$SERVICE" 2>/dev/null)"
