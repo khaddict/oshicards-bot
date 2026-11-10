@@ -41,7 +41,7 @@
 
 - 🎁 **Free boosters only.** Every request is sent with `maxGems: 0`, and the tool stops for good if a gem is ever spent.
 - 🗓️ **A schedule of your own.** Each install draws its own random profile: bedtime, sleep length, session rhythm, weekday quiet hours, weekend shift. No two installs play alike.
-- 🎮 **Three play styles.** `chill`, `regular` or `grinder`, depending on how many packs you want and how much you want to stand out.
+- 🎮 **Four play styles.** `chill`, `regular`, `grinder` or `nonstop`, depending on how many packs you want and how much you want to stand out.
 - 🪪 **Your browser's identity.** Setup copies your real user agent and language, so requests look like the browser you normally play with.
 - 👀 **Looks like an open tab.** Loads the pack page before playing, keeps the site's device cookies, and sends the same presence heartbeat as the web app.
 - 🛑 **Safety stop.** If the site answers anything unexpected (a block page, an unknown error), the tool stops and alerts you instead of insisting.
@@ -93,9 +93,12 @@ You can also pass a file (`oshibot cookie paste.txt`) or pipe the paste on stdin
 |---|---|---|---|
 | 🌙 `chill` | 30 to 40 | 3 to 4 | a casual player |
 | 🎯 `regular` | 50 to 70 | 4 to 6 | a dedicated player |
-| 🔥 `grinder` | 100 to 110 | 10 to 12 | the realistic maximum, and the most exposed |
+| 🔥 `grinder` | 100 to 110 | 10 to 12 | the realistic maximum for a human |
+| 🤖 `nonstop` | 130 to 135 | 14 to 15 | nobody: it plays around the clock |
 
-Figures come from two-week simulations of randomly drawn profiles. The theoretical maximum is 144 packs per day for a bot that never sleeps.
+Figures come from two-week simulations of randomly drawn profiles. The theoretical maximum is 144 packs per day.
+
+`nonstop` has no night break. It keeps the random gaps and pauses, but an account that plays every hour of every day is not a human one, so it is by far the easiest preset to spot. Only use it on an account you do not mind losing.
 
 Free boosters regenerate at one every 10 minutes, up to a stock of 10. Some quests raise that limit (12 on the account used for testing). `oshibot` reads the real stock size and refill rate of your account from the site's answers, so nothing is hardcoded. Emptying the stock just before it is full loses nothing, so even `grinder` never hammers the API.
 
@@ -115,7 +118,7 @@ Light days   : 11% of days, partial sessions: 14%, delayed sessions: 9%
 | Behaviour | Drawn once per install | Varies every day |
 |---|---|---|
 | Bedtime | base between 22:30 and 02:30 | jitter, later on weekends |
-| Sleep | 6 to 9 hours depending on the preset | plus or minus 20 min |
+| Sleep | 6 to 9 hours depending on the preset, none with `nonstop` | plus or minus 20 min |
 | Session gap | its own minimum and maximum | each gap drawn in that range |
 | Quiet block | start and length (work, school), weekdays only | end time |
 | Pause between packs | its own range | each pause, with occasional long ones |

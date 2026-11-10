@@ -118,7 +118,11 @@ gen_profile() {
       GAP_MIN=$(rand 65 85); GAP_MAX=$(rand 105 120); SLEEP_MIN=$(rand 360 450)
       QUIET_LEN=0; SKIP_CHANCE=$(rand 3 8)
       LIGHT_DAY_CHANCE=$(rand 3 7); PARTIAL_CHANCE=$(rand 3 8) ;;
-    *) die "unknown preset: $preset (chill, regular or grinder)" ;;
+    nonstop)
+      GAP_MIN=$(rand 65 85); GAP_MAX=$(rand 105 120); SLEEP_MIN=0
+      QUIET_LEN=0; SKIP_CHANCE=$(rand 2 5)
+      LIGHT_DAY_CHANCE=0; PARTIAL_CHANCE=$(rand 2 5) ;;
+    *) die "unknown preset: $preset (chill, regular, grinder or nonstop)" ;;
   esac
   PRESET=$preset
   BED_BASE=$(( $(rand 0 240) - 90 ))
@@ -174,16 +178,17 @@ EOF
 ensure_profile() {
   [[ -f $PROFILE ]] && return
   gen_profile regular
-  warn "no profile yet, drew a ${B}regular${R} one (change it with: oshibot profile <chill|regular|grinder>)"
+  warn "no profile yet, drew a ${B}regular${R} one (change it with: oshibot profile <chill|regular|grinder|nonstop>)"
 }
 
 show_profile() {
-  local quiet="none"
+  local quiet="none" night="none, plays around the clock"
+  (( SLEEP_MIN > 0 )) && night="around $(hhmm $BED_BASE) to $(hhmm $((BED_BASE + SLEEP_MIN))) (+/- $NIGHT_JITTER min, +$WEEKEND_SHIFT min on weekends)"
   (( QUIET_LEN > 0 )) && quiet="$(hhmm $QUIET_START) to $(hhmm $((QUIET_START + QUIET_LEN))) on weekdays"
   cat <<EOF
 Preset       : ${B}$PRESET${R}
 Sessions     : every $GAP_MIN to $GAP_MAX min
-Night        : around $(hhmm $BED_BASE) to $(hhmm $((BED_BASE + SLEEP_MIN))) (+/- $NIGHT_JITTER min, +$WEEKEND_SHIFT min on weekends)
+Night        : $night
 Quiet block  : $quiet
 Between packs: $PACK_PAUSE_MIN to $PACK_PAUSE_MAX s
 Light days   : $LIGHT_DAY_CHANCE% of days, partial sessions: $PARTIAL_CHANCE%, delayed sessions: $SKIP_CHANCE%
@@ -196,13 +201,16 @@ choose_preset() {
   cat <<EOF
   ${B}1) chill${R}     about 35 packs a day, a casual player
   ${B}2) regular${R}   about 60 packs a day, a dedicated player
-  ${B}3) grinder${R}   about 100 packs a day, the realistic maximum and the most exposed
+  ${B}3) grinder${R}   about 100 packs a day, the realistic maximum for a human
+  ${B}4) nonstop${R}   about 135 packs a day, plays around the clock: no human does that,
+               by far the easiest to spot
 
 EOF
   read -r -p "Choice [2] > " c
   case ${c:-2} in
     1 | chill) echo chill >&3 ;;
     3 | grinder) echo grinder >&3 ;;
+    4 | nonstop) echo nonstop >&3 ;;
     *) echo regular >&3 ;;
   esac
 }
@@ -566,17 +574,21 @@ draw_night() {
   is_weekend_night "$1" && shift=$WEEKEND_SHIFT
   BED=$(( $1 + (BED_BASE + shift) * 60 + $(rand 0 $((NIGHT_JITTER * 120))) - NIGHT_JITTER * 60 ))
   WAKE=$(( BED + SLEEP_MIN * 60 + $(rand 0 2400) - 1200 ))
+  # no sleep: the night is empty and only marks the change of day
+  (( SLEEP_MIN > 0 )) || WAKE=$BED
 }
 
 # upcoming night, or the current one when started before wake-up
 plan_night() {
-  local t=$(now) day prev=$WAKE
-  day=$(date -d "@$t" +%F)
-  draw_night "$(date -d "$day 00:00" +%s)"
-  # skip a night that is already over, or the one we just woke up from
-  if (( WAKE <= t )) || (( prev > 0 && BED < prev + 14400 )); then
-    draw_night "$(date -d "$day tomorrow" +%s)"
-  fi
+  local t=$(now) base prev=$WAKE i
+  base=$(date -d "$(date -d "@$t" +%F) 00:00" +%s)
+  draw_night "$base"
+  # skip nights that are already over, or the one we just woke up from
+  for i in 1 2 3; do
+    (( WAKE <= t )) || (( prev > 0 && BED < prev + 14400 )) || break
+    base=$(date -d "$(date -d "@$base" +%F) tomorrow" +%s)
+    draw_night "$base"
+  done
   DAY_FACTOR=10
   (( $(rand 1 100) <= LIGHT_DAY_CHANCE )) && DAY_FACTOR=$(rand 25 40)
   state_set BED "$BED"; state_set WAKE "$WAKE"; state_set LIGHT "$(( DAY_FACTOR > 10 ))"
@@ -651,9 +663,9 @@ cmd_run() {
       (( last + GAP_MIN * 60 - $(now) > gap )) && gap=$(( last + GAP_MIN * 60 - $(now) ))
     else
       gap=$(( $(rand $GAP_MIN $GAP_MAX) * 6 * DAY_FACTOR + $(rand 0 59) ))
-      # grinder comes back before the stock is full, whatever its size
+      # the top presets come back before the stock is full, whatever its size
       fill=$(( $(max_packs) * $(regen_minutes) * 60 ))
-      if [[ $PRESET == grinder ]] && (( DAY_FACTOR == 10 && gap > fill )); then
+      if [[ $PRESET == grinder || $PRESET == nonstop ]] && (( DAY_FACTOR == 10 && gap > fill )); then
         gap=$(( fill - $(rand 0 420) ))
       fi
       if (( $(rand 1 100) <= SKIP_CHANCE )); then
@@ -662,7 +674,7 @@ cmd_run() {
     fi
     target=$(next_session_at "$gap")
     state_set NEXT "$target"
-    log "next session at $(date -d "@$target" '+%a %H:%M') (in $(( (target - $(now)) / 60 )) min), night from $(date -d "@$BED" +%H:%M) to $(date -d "@$WAKE" +%H:%M)$( ((DAY_FACTOR > 10)) && echo ', light day')"
+    log "next session at $(date -d "@$target" '+%a %H:%M') (in $(( (target - $(now)) / 60 )) min)$( ((SLEEP_MIN > 0)) && echo ", night from $(date -d "@$BED" +%H:%M) to $(date -d "@$WAKE" +%H:%M)")$( ((DAY_FACTOR > 10)) && echo ', light day')"
     gap=$(( target - $(now) ))
     sleep $(( gap > 0 ? gap : 0 ))
     (( $(pause_until) > $(now) )) && continue
@@ -773,7 +785,7 @@ cmd_profile() {
     ensure_profile
     show_profile
     echo
-    echo "Redraw with: oshibot profile <chill|regular|grinder>"
+    echo "Redraw with: oshibot profile <chill|regular|grinder|nonstop>"
     return
   fi
   gen_profile "$preset"
@@ -865,7 +877,7 @@ cmd_status() {
     echo "Session : ${RED}none${R} (run: oshibot cookie)"
   fi
   echo "Browser : $(has_browser && echo "${GRN}$(jq -r '.browser.ua' "$DEVICE" | grep -oE '(Chrome|Firefox|Version)/[0-9]+' | tail -1)${R}, language $(jq -r .browser.accept_language "$DEVICE")" || echo "${YEL}generic${R} (run: oshibot browser)")"
-  echo "Profile : $([[ -n $PRESET ]] && echo "${GRN}$PRESET${R}, sessions every $GAP_MIN to $GAP_MAX min (details: oshibot profile)" || echo "${YEL}not drawn yet${R} (run: oshibot profile <chill|regular|grinder>)")"
+  echo "Profile : $([[ -n $PRESET ]] && echo "${GRN}$PRESET${R}, sessions every $GAP_MIN to $GAP_MAX min (details: oshibot profile)" || echo "${YEL}not drawn yet${R} (run: oshibot profile <chill|regular|grinder|nonstop>)")"
   echo "Stock   : $([[ -n $(state_get FREE_MAX "") ]] && echo "up to $(max_packs) free boosters, one every $(regen_minutes) min (read from your account)" || echo "not known yet, read from the site at the first opening")"
   echo "Webhook : $([[ -n $WEBHOOK ]] && echo "${GRN}configured${R}" || echo "${YEL}not configured${R} (run: oshibot webhook <url>)")"
   if [[ -f $UNIT ]]; then
@@ -878,7 +890,7 @@ cmd_status() {
   (( pu > $(now) )) && echo "${YEL}Paused${R}  : until $(date -d "@$pu" '+%a %d %b %H:%M') (run: oshibot resume)"
   next=$(state_get NEXT 0)
   if [[ -f $UNIT ]] && (( next > $(now) )); then
-    echo "Next    : session at $(date -d "@$next" '+%a %H:%M'), night from $(date -d "@$(state_get BED 0)" +%H:%M) to $(date -d "@$(state_get WAKE 0)" +%H:%M)$([[ $(state_get LIGHT 0) == 1 ]] && echo ', light day')"
+    echo "Next    : session at $(date -d "@$next" '+%a %H:%M')$( ((SLEEP_MIN > 0)) && echo ", night from $(date -d "@$(state_get BED 0)" +%H:%M) to $(date -d "@$(state_get WAKE 0)" +%H:%M)")$([[ $(state_get LIGHT 0) == 1 ]] && echo ', light day')"
   fi
   load_stats
   echo "Today   : $(recap_line "$(date +%F)")"
@@ -958,7 +970,7 @@ ${B}Setup${R}
   oshibot setup              guided setup: account, play style, Discord, service
   oshibot cookie [file]      connect your account (step by step guide)
   oshibot browser [file]     save your browser's identity without changing the session
-  oshibot profile [preset]   show your profile, or draw a new one: chill, regular, grinder
+  oshibot profile [preset]   show your profile, or draw a new one: chill, regular, grinder, nonstop
   oshibot webhook <url>      Discord webhook for legendary and mythic pulls (test, off)
 
 ${B}Play${R}
