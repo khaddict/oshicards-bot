@@ -97,7 +97,7 @@ You can also pass a file (`oshibot cookie paste.txt`) or pipe the paste on stdin
 
 Figures come from two-week simulations of randomly drawn profiles. The theoretical maximum is 144 packs per day for a bot that never sleeps.
 
-Free boosters regenerate at one every 10 minutes and cap at 12. Emptying the stock every two hours loses nothing, so even `grinder` never hammers the API.
+Free boosters regenerate at one every 10 minutes, up to a stock of 10. Some quests raise that limit (12 on the account used for testing). `oshibot` reads the real stock size and refill rate of your account from the site's answers, so nothing is hardcoded. Emptying the stock just before it is full loses nothing, so even `grinder` never hammers the API.
 
 Switch or redraw at any time with `oshibot profile <preset>`, and see what you got with `oshibot profile`:
 
