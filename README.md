@@ -177,9 +177,23 @@ Everything lives next to the script and is ignored by git:
 - **No guarantee against bans.** The schedule copies a human one, but requests still come from `curl` and from wherever you host the tool. A site that inspects TLS fingerprints or IP ranges can tell the difference. `CURL_BIN` in the profile lets you point to another curl build such as curl-impersonate; this is untested.
 - **Volume is a signal on its own.** Even a perfect schedule stands out if it opens 100 packs every single day. Pick the lowest preset you are happy with.
 - **This repository is public.** The site's admins can read it too.
-- **Sessions can be revoked.** If the site ends the session, the service stops and tells you on Discord. Run `oshibot cookie` again.
+- **Sessions can be revoked.** If the site ends the session, the service stops and tells you on Discord. Run `oshibot cookie` again. See the next section if it keeps happening.
 - **Standard booster only.** The pack type is the `SLUG` setting.
 - **It can break at any time.** The tool relies on private endpoints observed in the browser. A site update may change them.
+
+## 🩹 The session keeps dying
+
+You should only have to run `oshibot cookie` once. The access token lasts an hour and `oshibot` renews it by itself, for as long as the login behind it stays alive.
+
+If the service stops after a few hours with `refresh_token_already_used`, a browser is using the **same login** as `oshibot`. Each renewal by one of them invalidates the other, and the site ends up logging both out.
+
+The login you give to `oshibot` must belong to it alone:
+
+1. Open a **new** private window and log in there. Do not reuse a tab that is already logged in.
+2. Copy the cookie and paste it into `oshibot cookie`.
+3. **Close that private window right away**, without logging out.
+
+Your regular browser has its own login, so you can keep playing there. `oshibot cookie` warns you when the login you paste is more than 20 minutes old, which usually means it is shared with an open browser.
 
 ## ⚙️ How it works
 

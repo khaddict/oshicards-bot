@@ -249,8 +249,31 @@ refresh_session() {
     return 0
   fi
   [[ $HTTP_STATUS == 000 || $HTTP_STATUS == 429 || $HTTP_STATUS == 5* ]] && return 1
-  err "session rejected ($HTTP_STATUS): ${HTTP_BODY:0:200}"
+  SESSION_ERR=$(jq -r '.error_code // empty' <<<"$HTTP_BODY" 2>/dev/null)
+  err "session rejected ($HTTP_STATUS${SESSION_ERR:+, $SESSION_ERR})"
+  err "$(session_dead_reason)"
   return 2
+}
+
+SESSION_ERR=""
+session_dead_reason() {
+  case $SESSION_ERR in
+    refresh_token_already_used)
+      echo "a browser is using the same login as oshibot, and they logged each other out. Run oshibot cookie again from a fresh private window, and close that window right after." ;;
+    *) echo "the site ended this session (logged out or revoked). Run oshibot cookie again from a fresh private window, and close that window right after." ;;
+  esac
+}
+
+# when the session's login happened (epoch), read from the access token
+session_login_time() {
+  local p
+  p=$(jq -r '.access_token // ""' "$SESSION" | cut -d. -f2 | tr '_-' '/+')
+  case $(( ${#p} % 4 )) in
+    2) p+="==" ;;
+    3) p+="=" ;;
+  esac
+  p=$(base64 -d 2>/dev/null <<<"$p" | jq -r '.amr[0].timestamp // 0' 2>/dev/null)
+  echo "${p:-0}"
 }
 
 ensure_session() {
@@ -547,7 +570,7 @@ play_session() {
     fi
   done
   state_set LAST_SESSION "$(now)"
-  (( ret == 2 )) && err "the session is no longer valid, run: ${B}oshibot cookie${R}"
+  (( ret == 2 )) && err "the session is no longer valid"
   ok "$opened pack(s) opened"
   return $ret
 }
@@ -684,7 +707,7 @@ cmd_run() {
     locked_session "$want"
     case $? in
       2)
-        discord_text "oshicards session expired, run \`oshibot cookie\` again on the server."
+        discord_text "oshibot lost its oshicards session: $(session_dead_reason)"
         exit 2 ;;
       3) exit 3 ;;
     esac
@@ -695,6 +718,8 @@ cmd_run() {
 
 restart_service() {
   systemctl is-enabled -q "$SERVICE" 2>/dev/null || return 0
+  # only the copy the service actually runs may restart it
+  grep -qF "ExecStart=$DIR/oshibot run" "$UNIT" 2>/dev/null || return 0
   if (( EUID == 0 )); then
     systemctl restart "$SERVICE" && ok "service restarted"
   else
@@ -723,7 +748,7 @@ read_paste() {
 }
 
 cmd_cookie() {
-  local input=${1:-} token cookie
+  local input=${1:-} token cookie login
   if [[ -z $input && -t 0 ]]; then
     cat <<EOF
 ${B}How to connect your oshicards account${R}
@@ -735,12 +760,13 @@ ${B}How to connect your oshicards account${R}
 
      (if the browser blocks pasting, type this first: allow pasting)
   3. Paste the result below and press Enter.
-  4. Close the private window ${B}without logging out${R}.
+  4. ${B}Close the private window right away, without logging out.${R}
 
   ${DIM}The line copies your session cookie and your browser's identity (user agent,
   language) so the tool presents itself like your own browser.
-  Why a private window: the tool keeps its own session, so your regular
-  browser stays logged in.${R}
+  Why a private window, closed at once: the login must belong to oshibot alone.
+  If a browser keeps using the same login, the two log each other out within hours.
+  Your regular browser has its own login and is not affected.${R}
 
 EOF
   fi
@@ -755,6 +781,11 @@ EOF
   [[ -z $token ]] && die "no $COOKIE_NAME cookie found in what you pasted"
   refresh_session "$token" || die "could not create the session (cookie expired or already used?)"
   ok "session saved for ${B}$(jq -r '.user.email // .user.id' "$SESSION")${R}"
+  login=$(session_login_time)
+  if (( login > 0 && $(now) - login > 1200 )); then
+    warn "this login is $(( ($(now) - login) / 60 )) min old, so it is probably shared with an open browser."
+    warn "They will log each other out within hours. Use a fresh private window and close it right after."
+  fi
   has_browser || warn "no browser identity saved, a generic one will be used (run: oshibot browser)"
   restart_service
 }
