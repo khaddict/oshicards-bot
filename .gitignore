@@ -1,0 +1,11 @@
+session.json
+device.json
+profile
+config
+state
+history.tsv
+pause
+halted
+.lock
+*.tmp
+*.har

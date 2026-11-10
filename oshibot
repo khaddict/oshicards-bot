@@ -1,0 +1,981 @@
+#!/usr/bin/env bash
+# oshibot: opens your free oshicards boosters at a human pace. Run "oshibot help".
+# Unofficial, use at your own risk. https://oshicards.com
+set -uo pipefail
+
+for dep in curl jq shuf flock base64; do
+  command -v "$dep" >/dev/null || { echo "oshibot: missing dependency: $dep" >&2; exit 1; }
+done
+(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 402 )) || { echo "oshibot: bash 4.2 or newer is required" >&2; exit 1; }
+
+DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+SESSION="$DIR/session.json"
+DEVICE="$DIR/device.json"
+PROFILE="$DIR/profile"
+CONFIG="$DIR/config"
+STATE="$DIR/state"
+HISTORY="$DIR/history.tsv"
+PAUSE="$DIR/pause"
+HALT="$DIR/halted"
+LOCK="$DIR/.lock"
+
+REF="dxfbhiodyzhizffghkoi"
+SUPABASE="https://$REF.supabase.co"
+APIKEY="sb_publishable_sCyHXLIjZQxzUFVjb0C6nA_4lsuhQYl"
+SITE="https://oshicards.com"
+COOKIE_NAME="sb-$REF-auth-token"
+LOCALES="en fr es de"
+MAX_PACKS=12
+NOTIFY_RARITIES='["legendary","mythic"]'
+SERVICE="oshibot"
+UNIT="/etc/systemd/system/$SERVICE.service"
+SNIPPET='copy(JSON.stringify({ua:navigator.userAgent,brands:navigator.userAgentData?.brands,platform:navigator.userAgentData?.platform,mobile:navigator.userAgentData?.mobile,lang:navigator.languages,cookie:document.cookie}))'
+
+# fallbacks only: the real values are drawn per install into the profile file
+PRESET=""
+SLUG="standard"
+CURL_BIN="curl"
+DAILY_RECAP=1
+GAP_MIN=90; GAP_MAX=180
+SKIP_CHANCE=10; SKIP_EXTRA_MIN=45; SKIP_EXTRA_MAX=90
+LIGHT_DAY_CHANCE=10; PARTIAL_CHANCE=10
+BED_BASE=30; SLEEP_MIN=450; NIGHT_JITTER=45; WEEKEND_SHIFT=60
+QUIET_START=600; QUIET_LEN=0
+PACK_PAUSE_MIN=10; PACK_PAUSE_MAX=25
+LONG_PAUSE_CHANCE=15; LONG_PAUSE_MIN=20; LONG_PAUSE_MAX=90
+
+WEBHOOK=""
+[[ -f $PROFILE ]] && source "$PROFILE"
+[[ -f $CONFIG ]] && source "$CONFIG"
+
+if [[ -t 1 ]]; then
+  B=$'\e[1m'; DIM=$'\e[2m'; RED=$'\e[31m'; GRN=$'\e[32m'; YEL=$'\e[33m'; CYA=$'\e[36m'; R=$'\e[0m'
+else
+  B=""; DIM=""; RED=""; GRN=""; YEL=""; CYA=""; R=""
+fi
+
+log()  { echo "${DIM}$(date +%H:%M:%S)${R} $*"; }
+ok()   { log "${GRN}OK${R} $*"; }
+warn() { log "${YEL}!${R} $*"; }
+err()  { log "${RED}ERROR${R} $*" >&2; }
+die()  { err "$*"; exit 1; }
+rand() { shuf -i "$1-$2" -n 1; }
+now()  { date +%s; }
+hhmm() { printf '%02d:%02d' $(( ($1 % 1440 + 1440) % 1440 / 60 )) $(( ($1 % 1440 + 1440) % 60 )); }
+
+state_get() {
+  local v=""
+  [[ -f $STATE ]] && v=$(grep -m1 "^$1=" "$STATE" | cut -d= -f2-)
+  echo "${v:-$2}"
+}
+
+state_set() {
+  { [[ -f $STATE ]] && grep -v "^$1=" "$STATE"; echo "$1=$2"; } >"$STATE.tmp"
+  mv "$STATE.tmp" "$STATE"
+}
+
+http_post() {
+  local url=$1 body=$2 out
+  shift 2
+  if ! out=$("$CURL_BIN" -sS -m 30 -H 'Content-Type: application/json' "$@" \
+      -d "$body" -w $'\n%{http_code}' "$url" 2>/dev/null); then
+    HTTP_STATUS=000; HTTP_BODY=""; return
+  fi
+  HTTP_STATUS=${out##*$'\n'}
+  HTTP_BODY=${out%$'\n'*}
+}
+
+# ---------- profile ----------
+
+gen_profile() {
+  local preset=$1 pmin
+  case $preset in
+    chill)
+      GAP_MIN=$(rand 150 210); GAP_MAX=$(rand 300 420); SLEEP_MIN=$(rand 450 540)
+      QUIET_LEN=$(rand 300 480); SKIP_CHANCE=$(rand 10 20)
+      LIGHT_DAY_CHANCE=$(rand 15 25); PARTIAL_CHANCE=$(rand 20 30) ;;
+    regular)
+      GAP_MIN=$(rand 90 130); GAP_MAX=$(rand 170 240); SLEEP_MIN=$(rand 420 510)
+      QUIET_LEN=$(rand 180 300); SKIP_CHANCE=$(rand 8 15)
+      LIGHT_DAY_CHANCE=$(rand 8 14); PARTIAL_CHANCE=$(rand 10 20) ;;
+    grinder)
+      GAP_MIN=$(rand 65 85); GAP_MAX=$(rand 105 120); SLEEP_MIN=$(rand 360 450)
+      QUIET_LEN=0; SKIP_CHANCE=$(rand 3 8)
+      LIGHT_DAY_CHANCE=$(rand 3 7); PARTIAL_CHANCE=$(rand 3 8) ;;
+    *) die "unknown preset: $preset (chill, regular or grinder)" ;;
+  esac
+  PRESET=$preset
+  BED_BASE=$(( $(rand 0 240) - 90 ))
+  NIGHT_JITTER=$(rand 25 70)
+  WEEKEND_SHIFT=$(rand 20 110)
+  QUIET_START=$(rand 510 780)
+  pmin=$(rand 7 14)
+  PACK_PAUSE_MIN=$pmin
+  PACK_PAUSE_MAX=$(( pmin + $(rand 10 22) ))
+  LONG_PAUSE_CHANCE=$(rand 8 22)
+  LONG_PAUSE_MAX=$(rand 60 150)
+  SKIP_EXTRA_MIN=$(rand 30 60)
+  SKIP_EXTRA_MAX=$(( SKIP_EXTRA_MIN + $(rand 20 70) ))
+  cat >"$PROFILE" <<EOF
+# Drawn at random for this install. Edit freely, or redraw with: oshibot profile <preset>
+PRESET=$PRESET
+
+# minutes between two sessions
+GAP_MIN=$GAP_MIN
+GAP_MAX=$GAP_MAX
+# % of sessions pushed back by SKIP_EXTRA minutes
+SKIP_CHANCE=$SKIP_CHANCE
+SKIP_EXTRA_MIN=$SKIP_EXTRA_MIN
+SKIP_EXTRA_MAX=$SKIP_EXTRA_MAX
+# % of days played lightly, % of sessions that leave part of the stock
+LIGHT_DAY_CHANCE=$LIGHT_DAY_CHANCE
+PARTIAL_CHANCE=$PARTIAL_CHANCE
+
+# night: bedtime in minutes after midnight (negative = before), sleep length in minutes,
+# daily jitter in minutes, extra minutes on Friday and Saturday nights
+BED_BASE=$BED_BASE
+SLEEP_MIN=$SLEEP_MIN
+NIGHT_JITTER=$NIGHT_JITTER
+WEEKEND_SHIFT=$WEEKEND_SHIFT
+
+# weekday quiet block (work, school): start in minutes after midnight, length in minutes, 0 = none
+QUIET_START=$QUIET_START
+QUIET_LEN=$QUIET_LEN
+
+# seconds between two packs, and % of longer pauses
+PACK_PAUSE_MIN=$PACK_PAUSE_MIN
+PACK_PAUSE_MAX=$PACK_PAUSE_MAX
+LONG_PAUSE_CHANCE=$LONG_PAUSE_CHANCE
+LONG_PAUSE_MIN=$LONG_PAUSE_MIN
+LONG_PAUSE_MAX=$LONG_PAUSE_MAX
+
+SLUG=$SLUG
+DAILY_RECAP=$DAILY_RECAP
+CURL_BIN=$CURL_BIN
+EOF
+}
+
+ensure_profile() {
+  [[ -f $PROFILE ]] && return
+  gen_profile regular
+  warn "no profile yet, drew a ${B}regular${R} one (change it with: oshibot profile <chill|regular|grinder>)"
+}
+
+show_profile() {
+  local quiet="none"
+  (( QUIET_LEN > 0 )) && quiet="$(hhmm $QUIET_START) to $(hhmm $((QUIET_START + QUIET_LEN))) on weekdays"
+  cat <<EOF
+Preset       : ${B}$PRESET${R}
+Sessions     : every $GAP_MIN to $GAP_MAX min
+Night        : around $(hhmm $BED_BASE) to $(hhmm $((BED_BASE + SLEEP_MIN))) (+/- $NIGHT_JITTER min, +$WEEKEND_SHIFT min on weekends)
+Quiet block  : $quiet
+Between packs: $PACK_PAUSE_MIN to $PACK_PAUSE_MAX s
+Light days   : $LIGHT_DAY_CHANCE% of days, partial sessions: $PARTIAL_CHANCE%, delayed sessions: $SKIP_CHANCE%
+File         : $PROFILE
+EOF
+}
+
+choose_preset() {
+  local c
+  cat <<EOF
+  ${B}1) chill${R}     about 35 packs a day, a casual player
+  ${B}2) regular${R}   about 60 packs a day, a dedicated player
+  ${B}3) grinder${R}   about 100 packs a day, the realistic maximum and the most exposed
+
+EOF
+  read -r -p "Choice [2] > " c
+  case ${c:-2} in
+    1 | chill) echo chill >&3 ;;
+    3 | grinder) echo grinder >&3 ;;
+    *) echo regular >&3 ;;
+  esac
+}
+
+# ---------- session ----------
+
+extract_refresh_token() {
+  local input=$1 val part i
+  if [[ $input =~ ^[A-Za-z0-9_-]{6,40}$ ]]; then
+    echo "$input"; return
+  fi
+  val=$(grep -oE "$COOKIE_NAME=[^;'\" ]+" <<<"$input" | head -1 | cut -d= -f2-)
+  if [[ -z $val ]]; then
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+      part=$(grep -oE "$COOKIE_NAME\.$i=[^;'\" ]+" <<<"$input" | head -1 | cut -d= -f2-)
+      [[ -z $part ]] && break
+      val+=$part
+    done
+  fi
+  [[ -z $val ]] && return 1
+  val=${val#base64-}
+  val=$(tr '_-' '/+' <<<"$val")
+  case $(( ${#val} % 4 )) in
+    2) val+="==" ;;
+    3) val+="=" ;;
+  esac
+  base64 -d 2>/dev/null <<<"$val" | grep -aoE '"refresh_token":"[^"]+"' | head -1 | cut -d'"' -f4
+}
+
+# 0 = ok, 1 = network, 2 = token rejected
+refresh_session() {
+  http_post "$SUPABASE/auth/v1/token?grant_type=refresh_token" \
+    "$(jq -nc --arg t "$1" '{refresh_token:$t}')" "${BROWSER[@]}" -H "apikey: $APIKEY"
+  if [[ $HTTP_STATUS == 200 ]] && jq -e .access_token >/dev/null 2>&1 <<<"$HTTP_BODY"; then
+    (umask 077; jq -c . <<<"$HTTP_BODY" >"$SESSION.tmp") && mv "$SESSION.tmp" "$SESSION"
+    return 0
+  fi
+  [[ $HTTP_STATUS == 000 || $HTTP_STATUS == 429 || $HTTP_STATUS == 5* ]] && return 1
+  err "session rejected ($HTTP_STATUS): ${HTTP_BODY:0:200}"
+  return 2
+}
+
+ensure_session() {
+  [[ -f $SESSION ]] || { err "no session, run: ${B}oshibot cookie${R}"; return 2; }
+  local exp
+  exp=$(jq -r '.expires_at // 0' "$SESSION")
+  (( exp - $(now) > 600 )) && return 0
+  refresh_session "$(jq -r .refresh_token "$SESSION")"
+}
+
+# ---------- browser identity ----------
+
+ensure_device() {
+  [[ -f $DEVICE ]] && return
+  (umask 077; jq -nc --arg k "$(cat /proc/sys/kernel/random/uuid)" \
+    '{presence_key:$k, cookies:{oshi_tour_seen:"1"}}' >"$DEVICE")
+}
+
+BROWSER=()
+LOCALE="en"
+load_browser() {
+  local ua="" al="" ch="" plat="" mob="" loc=""
+  if [[ -f $DEVICE ]]; then
+    IFS=$'\x1f' read -r ua al ch plat mob loc < <(jq -r '.browser // {} |
+      [.ua // "", .accept_language // "", .sec_ch_ua // "", .platform // "", (.mobile // false | tostring), .locale // ""] | join("\u001f")' "$DEVICE")
+  fi
+  if [[ -z $ua ]]; then
+    ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+    al="en-US,en;q=0.9"
+    ch='"Not-A.Brand";v="99", "Chromium";v="157", "Google Chrome";v="157"'
+    plat="Windows"; mob="false"
+  fi
+  LOCALE=${loc:-en}
+  BROWSER=(-A "$ua" -H "Accept-Language: $al")
+  if [[ -n $ch ]]; then
+    BROWSER+=(-H "sec-ch-ua: $ch" -H "sec-ch-ua-mobile: $([[ $mob == true ]] && echo '?1' || echo '?0')"
+      -H "sec-ch-ua-platform: \"$plat\"")
+  fi
+}
+
+has_browser() { [[ -f $DEVICE ]] && jq -e '.browser.ua' "$DEVICE" >/dev/null 2>&1; }
+
+# $1 = JSON produced by the console snippet
+save_browser() {
+  local b
+  b=$(jq -c --arg locales "$LOCALES" '
+    select(type == "object" and (.ua | type == "string") and (.ua | startswith("Mozilla/"))) |
+    (.lang // ["en-US", "en"]) as $l |
+    {ua,
+     sec_ch_ua: (if (.brands | type) == "array" then (.brands | map("\"\(.brand)\";v=\"\(.version)\"") | join(", ")) else null end),
+     platform: (.platform // null),
+     mobile: (.mobile // false),
+     accept_language: ($l[:5] | to_entries | map(if .key == 0 then .value else "\(.value);q=0.\(10 - .key)" end) | join(",")),
+     locale: (($l[0] // "en")[:2] as $c | if ($locales | split(" ") | index($c)) then $c else "en" end)}' <<<"$1" 2>/dev/null)
+  [[ -z $b ]] && return 1
+  ensure_device
+  jq -c --argjson b "$b" '.browser = $b' "$DEVICE" >"$DEVICE.tmp" && mv "$DEVICE.tmp" "$DEVICE"
+  load_browser
+}
+
+save_site_cookies() {
+  local name val
+  for name in NEXT_LOCALE oshi_dev oc_visit; do
+    val=$(grep -i "^set-cookie: $name=" "$1" | tail -1 | tr -d '\r' | sed -E 's/^[^=]+=([^;]*).*/\1/')
+    [[ -z $val ]] && continue
+    jq -c --arg n "$name" --arg v "$val" '.cookies[$n]=$v' "$DEVICE" >"$DEVICE.tmp" && mv "$DEVICE.tmp" "$DEVICE"
+  done
+}
+
+cookie_header() {
+  local val i=0 out
+  ensure_device
+  out=$(jq -r '.cookies | to_entries | map("\(.key)=\(.value); ") | add // ""' "$DEVICE")
+  val="base64-$(jq -c . "$SESSION" | tr -d '\n' | base64 -w0 | tr '/+' '_-' | tr -d '=')"
+  if (( ${#val} <= 3180 )); then
+    echo "Cookie: $out$COOKIE_NAME=$val"; return
+  fi
+  while [[ -n $val ]]; do
+    out+="$COOKIE_NAME.$i=${val:0:3180}; "
+    val=${val:3180}
+    i=$((i + 1))
+  done
+  echo "Cookie: ${out%; }"
+}
+
+PAGE_CODE=000
+visit_page() {
+  local hdr
+  hdr=$(mktemp)
+  PAGE_CODE=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H "$(cookie_header)" \
+    -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8' \
+    -H 'sec-fetch-dest: document' -H 'sec-fetch-mode: navigate' -H 'sec-fetch-site: none' \
+    -H 'upgrade-insecure-requests: 1' --compressed \
+    -D "$hdr" -o /dev/null -w '%{http_code}' "$SITE/$LOCALE/open/$SLUG" 2>/dev/null) || PAGE_CODE=000
+  [[ $PAGE_CODE == 200 ]] && save_site_cookies "$hdr"
+  rm -f "$hdr"
+}
+
+LAST_PING=0
+presence_ping() {
+  (( $(now) - LAST_PING < 60 )) && return 0
+  LAST_PING=$(now)
+  http_post "$SUPABASE/rest/v1/rpc/presence_ping" \
+    "$(jq -c '{p_key:.presence_key}' "$DEVICE")" "${BROWSER[@]}" \
+    -H "apikey: $APIKEY" -H "Authorization: Bearer $(jq -r .access_token "$SESSION")" \
+    -H 'content-profile: public' -H 'x-client-info: supabase-ssr/0.12.7 createBrowserClient' \
+    -H "Origin: $SITE" -H "Referer: $SITE/"
+}
+
+# sleeps while keeping presence alive, like an open tab
+idle() {
+  local left=$1 step
+  while (( left > 0 )); do
+    step=$(( left < 20 ? left : 20 ))
+    sleep "$step"
+    left=$((left - step))
+    presence_ping
+  done
+}
+
+# ---------- discord ----------
+
+discord_send() {
+  [[ -z $WEBHOOK ]] && return 0
+  http_post "$WEBHOOK" "$1"
+  [[ $HTTP_STATUS == 2* ]] || warn "Discord webhook failed ($HTTP_STATUS)"
+}
+
+discord_text() {
+  discord_send "$(jq -nc --arg c "$1" '{username:"oshibot", content:$c}')"
+}
+
+loot_payload() {
+  jq -c --argjson rar "$NOTIFY_RARITIES" '
+    [.result.boosters[].cards[] | select(.rarity as $r | $rar | index($r))]
+    | if length == 0 then empty else
+      {username: "Oshi", embeds: (.[:10] | map({
+        title: ((.rarity | ascii_upcase) + ": " + .name),
+        description: (.series_title // ""),
+        color: (if .rarity == "mythic" then 15680580 else 16096779 end),
+        thumbnail: {url: .image_url},
+        fields: ([
+          {name: "Serial", value: "#\(.serial // "?")", inline: true},
+          {name: "New", value: (if .is_new then "yes" else "no" end), inline: true}
+        ] + (if .variant then [{name: "Variant", value: (.variant | tostring), inline: true}] else [] end))
+      }))}
+    end' <<<"$1"
+}
+
+# ---------- safety stop ----------
+
+halt() {
+  echo "$1" >"$HALT"
+  err "stopped: $1"
+  err "check your account in a browser, then run: ${B}oshibot resume${R}"
+  discord_text "oshibot stopped itself: $1. Check your account in a browser, then run \`oshibot resume\`."
+}
+
+# unexpected answer: tell a dead session (2) apart from a refusal by the site (3)
+stop_or_expired() {
+  refresh_session "$(jq -r .refresh_token "$SESSION")"
+  (( $? == 2 )) && return 2
+  halt "$1"
+  return 3
+}
+
+# ---------- stats ----------
+
+declare -A S_PACKS=() S_RARE=() S_EPIC=() S_LEG=() S_MYTH=()
+load_stats() {
+  S_PACKS=(); S_RARE=(); S_EPIC=(); S_LEG=(); S_MYTH=()
+  [[ -f $HISTORY ]] || return 0
+  local ts rar day r
+  while IFS=$'\t' read -r ts rar; do
+    [[ $ts =~ ^[0-9]+$ ]] || continue
+    printf -v day '%(%F)T' "$ts"
+    S_PACKS[$day]=$(( ${S_PACKS[$day]:-0} + 1 ))
+    for r in ${rar//,/ }; do
+      case $r in
+        rare) S_RARE[$day]=$(( ${S_RARE[$day]:-0} + 1 )) ;;
+        epic) S_EPIC[$day]=$(( ${S_EPIC[$day]:-0} + 1 )) ;;
+        legendary) S_LEG[$day]=$(( ${S_LEG[$day]:-0} + 1 )) ;;
+        mythic) S_MYTH[$day]=$(( ${S_MYTH[$day]:-0} + 1 )) ;;
+      esac
+    done
+  done <"$HISTORY"
+}
+
+recap_line() {
+  local d=$1
+  echo "${S_PACKS[$d]:-0} packs, ${S_RARE[$d]:-0} rare, ${S_EPIC[$d]:-0} epic, ${S_LEG[$d]:-0} legendary, ${S_MYTH[$d]:-0} mythic"
+}
+
+# ---------- opening ----------
+
+print_cards() {
+  jq -r '.result.boosters[].cards[] | "\(.rarity)\t\(.name)\t\((.series_title // "")[:50])\t\(if .is_new then "NEW" else "" end)"' <<<"$1" |
+  while IFS=$'\t' read -r rar name series new; do
+    local c=$DIM
+    case $rar in
+      *rare) c=$CYA ;;
+      *epic) c=$YEL ;;
+      *legendary | *mythic) c=$B$RED ;;
+    esac
+    printf '           %s%-10s%s %s %s(%s)%s %s\n' "$c" "$rar" "$R" "$name" "$DIM" "$series" "$R" "${new:+${GRN}$new${R}}"
+  done
+}
+
+# one play session: loads the page, then opens up to $1 packs.
+# 0 = ok, 2 = dead session, 3 = safety stop
+play_session() {
+  local want=$1 opened=0 i key payload body rc pause next_free fails ret=0
+  if [[ -f $HALT ]]; then
+    err "stopped earlier: $(<"$HALT") (run: ${B}oshibot resume${R})"; return 3
+  fi
+  next_free=$(state_get NEXT_FREE 0)
+  if (( $(now) < next_free )); then
+    log "no free booster before $(date -d "@$next_free" +%H:%M)"; return 0
+  fi
+  load_browser
+  ensure_session; rc=$?
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) && { warn "network unavailable, session postponed"; return 0; }
+
+  visit_page
+  case $PAGE_CODE in
+    200) state_set PAGE_FAILS 0 ;;
+    403 | 429) halt "the pack page answered HTTP $PAGE_CODE, the site may be blocking this tool"; return 3 ;;
+    000 | 5*) warn "pack page unreachable ($PAGE_CODE), session postponed"; return 0 ;;
+    *)
+      # redirected to the login page or similar: renew the session, give up after 3 tries
+      fails=$(( $(state_get PAGE_FAILS 0) + 1 ))
+      state_set PAGE_FAILS "$fails"
+      refresh_session "$(jq -r .refresh_token "$SESSION")"
+      (( $? == 2 )) && return 2
+      if (( fails >= 3 )); then
+        halt "the pack page keeps answering HTTP $PAGE_CODE"; return 3
+      fi
+      warn "pack page answered HTTP $PAGE_CODE, session renewed and postponed"; return 0 ;;
+  esac
+  LAST_PING=0
+  presence_ping
+  idle "$(rand 4 12)"
+
+  for ((i = 1; i <= want; i++)); do
+    ensure_session; rc=$?
+    (( rc == 2 )) && return 2
+    (( rc == 1 )) && { warn "network unavailable"; break; }
+
+    http_post "$SITE/api/open" \
+      "$(jq -nc --arg s "$SLUG" --arg id "$(cat /proc/sys/kernel/random/uuid)" \
+        '{slug:$s, quantity:1, maxGems:0, requestId:$id}')" \
+      "${BROWSER[@]}" -H "$(cookie_header)" -H 'Accept: */*' \
+      -H "Origin: $SITE" -H "Referer: $SITE/$LOCALE/open/$SLUG" \
+      -H 'sec-fetch-dest: empty' -H 'sec-fetch-mode: cors' -H 'sec-fetch-site: same-origin'
+
+    case $HTTP_STATUS in
+      200) ;;
+      000 | 5*) warn "server unavailable ($HTTP_STATUS)"; break ;;
+      403 | 429) halt "opening a pack answered HTTP $HTTP_STATUS, the site may be blocking this tool"; ret=3; break ;;
+      *) stop_or_expired "opening a pack answered HTTP $HTTP_STATUS"; ret=$?; break ;;
+    esac
+    key=$(jq -r '.errorKey // empty' <<<"$HTTP_BODY" 2>/dev/null)
+    if [[ $key == stockChanged ]]; then
+      log "no free booster available"; break
+    elif [[ -n $key ]]; then
+      stop_or_expired "opening a pack was refused with error \"$key\""; ret=$?; break
+    elif ! jq -e .result.boosters >/dev/null 2>&1 <<<"$HTTP_BODY"; then
+      stop_or_expired "opening a pack returned an unknown response"; ret=$?; break
+    fi
+
+    body=$HTTP_BODY
+    opened=$((opened + 1))
+    log "${B}pack $opened${R}$(jq -r 'if any(.result.boosters[]; .golden) then " (golden)" else "" end' <<<"$body")"
+    print_cards "$body"
+    printf '%s\t%s\n' "$(now)" "$(jq -r '[.result.boosters[].cards[].rarity] | join(",")' <<<"$body")" >>"$HISTORY"
+    payload=$(loot_payload "$body")
+    [[ -n $payload ]] && discord_send "$payload"
+
+    if (( $(jq -r '.result.paid.gems // 0' <<<"$body") > 0 )); then
+      halt "a pack was paid with gems instead of a free booster"; ret=3; break
+    fi
+    if (( $(jq -r '.result.state.free_boosters // 0' <<<"$body") <= 0 )); then
+      next_free=$(date -d "$(jq -r '.result.state.next_free_at // empty' <<<"$body")" +%s 2>/dev/null) || next_free=0
+      state_set NEXT_FREE "$next_free"
+      break
+    fi
+    state_set NEXT_FREE 0
+    if (( i < want )); then
+      pause=$(rand $PACK_PAUSE_MIN $PACK_PAUSE_MAX)
+      (( $(rand 1 100) <= LONG_PAUSE_CHANCE )) && pause=$((pause + $(rand $LONG_PAUSE_MIN $LONG_PAUSE_MAX)))
+      idle "$pause"
+    fi
+  done
+  state_set LAST_SESSION "$(now)"
+  (( ret == 2 )) && err "the session is no longer valid, run: ${B}oshibot cookie${R}"
+  ok "$opened pack(s) opened"
+  return $ret
+}
+
+locked_session() {
+  exec 9>"$LOCK"
+  flock -w 600 9 || die "another session is already running"
+  play_session "$1"; local rc=$?
+  flock -u 9
+  return $rc
+}
+
+# ---------- schedule ----------
+
+BED=0
+WAKE=0
+DAY_FACTOR=10
+
+is_weekend_night() { [[ $(date -d "@$1" +%u) -ge 6 ]]; }
+
+# $1 = midnight the night is attached to
+draw_night() {
+  local shift=0
+  is_weekend_night "$1" && shift=$WEEKEND_SHIFT
+  BED=$(( $1 + (BED_BASE + shift) * 60 + $(rand 0 $((NIGHT_JITTER * 120))) - NIGHT_JITTER * 60 ))
+  WAKE=$(( BED + SLEEP_MIN * 60 + $(rand 0 2400) - 1200 ))
+}
+
+# upcoming night, or the current one when started before wake-up
+plan_night() {
+  local t=$(now) day prev=$WAKE
+  day=$(date -d "@$t" +%F)
+  draw_night "$(date -d "$day 00:00" +%s)"
+  # skip a night that is already over, or the one we just woke up from
+  if (( WAKE <= t )) || (( prev > 0 && BED < prev + 14400 )); then
+    draw_night "$(date -d "$day tomorrow" +%s)"
+  fi
+  DAY_FACTOR=10
+  (( $(rand 1 100) <= LIGHT_DAY_CHANCE )) && DAY_FACTOR=$(rand 25 40)
+  state_set BED "$BED"; state_set WAKE "$WAKE"; state_set LIGHT "$(( DAY_FACTOR > 10 ))"
+}
+
+quiet_adjust() {
+  local target=$1 qs
+  if (( QUIET_LEN > 0 )) && (( $(date -d "@$target" +%u) <= 5 )); then
+    qs=$(( $(date -d "$(date -d "@$target" +%F) 00:00" +%s) + QUIET_START * 60 ))
+    if (( target >= qs && target < qs + QUIET_LEN * 60 )); then
+      target=$(( qs + QUIET_LEN * 60 + $(rand 0 1500) ))
+    fi
+  fi
+  echo "$target"
+}
+
+# $1 = wanted delay in seconds, prints the epoch of the next session
+next_session_at() {
+  local t=$(now) target
+  target=$((t + $1))
+  if (( target >= BED && target < WAKE )); then
+    # one last session at bedtime if worth it, otherwise at wake-up
+    if (( BED > t + 2400 )); then target=$BED; else target=$WAKE; fi
+  else
+    target=$(quiet_adjust "$target")
+  fi
+  echo "$target"
+}
+
+pause_until() {
+  local p=0
+  [[ -f $PAUSE ]] && p=$(<"$PAUSE")
+  echo "${p:-0}"
+}
+
+send_recap() {
+  (( DAILY_RECAP )) && [[ -n $WEBHOOK ]] || return 0
+  local d
+  d=$(date -d "@$(( $(now) - 86400 ))" +%F)
+  load_stats
+  (( ${S_PACKS[$d]:-0} > 0 )) && discord_text "Yesterday: $(recap_line "$d")."
+  return 0
+}
+
+cmd_run() {
+  local gap target first=1 last want pu
+  ensure_profile
+  ensure_device
+  load_browser
+  has_browser || warn "no browser identity saved, using a generic one (run: oshibot browser)"
+  [[ -f $HALT ]] && { err "stopped earlier: $(<"$HALT") (run: ${B}oshibot resume${R})"; exit 3; }
+  plan_night
+  log "loop started with the ${B}$PRESET${R} preset"
+  while true; do
+    if (( $(now) >= WAKE )); then
+      plan_night
+      send_recap
+    fi
+    pu=$(pause_until)
+    if (( pu > $(now) )); then
+      log "paused until $(date -d "@$pu" '+%a %d %b %H:%M')"
+      state_set NEXT "$pu"
+      gap=$(( pu - $(now) ))
+      sleep $(( gap < 21600 ? gap : 21600 ))
+      first=1
+      continue
+    fi
+    if (( first )); then
+      first=0
+      gap=$(rand 60 300)
+      last=$(state_get LAST_SESSION 0)
+      (( last + GAP_MIN * 60 - $(now) > gap )) && gap=$(( last + GAP_MIN * 60 - $(now) ))
+    else
+      gap=$(( $(rand $GAP_MIN $GAP_MAX) * 6 * DAY_FACTOR + $(rand 0 59) ))
+      if (( $(rand 1 100) <= SKIP_CHANCE )); then
+        gap=$(( gap + $(rand $SKIP_EXTRA_MIN $SKIP_EXTRA_MAX) * 60 ))
+      fi
+    fi
+    target=$(next_session_at "$gap")
+    state_set NEXT "$target"
+    log "next session at $(date -d "@$target" '+%a %H:%M') (in $(( (target - $(now)) / 60 )) min), night from $(date -d "@$BED" +%H:%M) to $(date -d "@$WAKE" +%H:%M)$( ((DAY_FACTOR > 10)) && echo ', light day')"
+    gap=$(( target - $(now) ))
+    sleep $(( gap > 0 ? gap : 0 ))
+    (( $(pause_until) > $(now) )) && continue
+
+    want=$MAX_PACKS
+    (( $(rand 1 100) <= PARTIAL_CHANCE )) && want=$(rand 3 9)
+    locked_session "$want"
+    case $? in
+      2)
+        discord_text "oshicards session expired, run \`oshibot cookie\` again on the server."
+        exit 2 ;;
+      3) exit 3 ;;
+    esac
+  done
+}
+
+# ---------- commands ----------
+
+restart_service() {
+  systemctl is-enabled -q "$SERVICE" 2>/dev/null || return 0
+  if (( EUID == 0 )); then
+    systemctl restart "$SERVICE" && ok "service restarted"
+  else
+    warn "restart the service to apply: ${B}sudo systemctl restart $SERVICE${R}"
+  fi
+}
+
+# when run with sudo, hand the data files back to the owner of the directory
+fix_owner() {
+  (( EUID == 0 )) || return 0
+  chown -f "$(stat -c %U:%G "$DIR")" "$SESSION" "$DEVICE" "$PROFILE" "$CONFIG" "$STATE" "$HISTORY" "$PAUSE" "$HALT" "$LOCK" 2>/dev/null
+  return 0
+}
+
+read_paste() {
+  local input=${1:-}
+  if [[ -n $input && -f $input ]]; then
+    input=$(<"$input")
+  elif [[ -z $input && ! -t 0 ]]; then
+    input=$(cat)
+  elif [[ -z $input ]]; then
+    read -r -e -p "Paste > " input
+    echo >&2
+  fi
+  echo "$input"
+}
+
+cmd_cookie() {
+  local input=${1:-} token cookie
+  if [[ -z $input && -t 0 ]]; then
+    cat <<EOF
+${B}How to connect your oshicards account${R}
+
+  1. Open ${CYA}$SITE${R} in a ${B}private browsing window${R} of your usual browser and log in.
+  2. Press F12, open the ${B}Console${R} tab and paste this line:
+
+       ${GRN}$SNIPPET${R}
+
+     (if the browser blocks pasting, type this first: allow pasting)
+  3. Paste the result below and press Enter.
+  4. Close the private window ${B}without logging out${R}.
+
+  ${DIM}The line copies your session cookie and your browser's identity (user agent,
+  language) so the tool presents itself like your own browser.
+  Why a private window: the tool keeps its own session, so your regular
+  browser stays logged in.${R}
+
+EOF
+  fi
+  input=$(read_paste "$input")
+  cookie=$input
+  if jq -e 'type == "object"' >/dev/null 2>&1 <<<"$input"; then
+    cookie=$(jq -r '.cookie // ""' <<<"$input")
+    save_browser "$input" && ok "browser identity saved" || warn "could not read the browser identity"
+  fi
+  load_browser
+  token=$(extract_refresh_token "$cookie") || true
+  [[ -z $token ]] && die "no $COOKIE_NAME cookie found in what you pasted"
+  refresh_session "$token" || die "could not create the session (cookie expired or already used?)"
+  ok "session saved for ${B}$(jq -r '.user.email // .user.id' "$SESSION")${R}"
+  has_browser || warn "no browser identity saved, a generic one will be used (run: oshibot browser)"
+  restart_service
+}
+
+cmd_browser() {
+  local input=${1:-}
+  if [[ -z $input && -t 0 ]]; then
+    cat <<EOF
+${B}Save your browser's identity${R}
+
+  In the browser you normally play with, press F12, open the ${B}Console${R} tab on any page and paste:
+
+       ${GRN}$SNIPPET${R}
+
+  Then paste the result below. Only the user agent and language are kept.
+
+EOF
+  fi
+  input=$(read_paste "$input")
+  save_browser "$input" || die "this is not the output of the console line"
+  ok "browser identity saved: $(jq -r .browser.ua "$DEVICE")"
+  restart_service
+}
+
+cmd_profile() {
+  local preset=${1:-}
+  if [[ -z $preset ]]; then
+    ensure_profile
+    show_profile
+    echo
+    echo "Redraw with: oshibot profile <chill|regular|grinder>"
+    return
+  fi
+  gen_profile "$preset"
+  ok "new ${B}$preset${R} profile drawn"
+  show_profile
+  restart_service
+}
+
+cmd_webhook() {
+  local url=${1:-}
+  case $url in
+    "")
+      if [[ -n $WEBHOOK ]]; then echo "Webhook: ${WEBHOOK:0:60}..."; else echo "No webhook configured."; fi
+      cat <<EOF
+
+Usage: oshibot webhook <url>     save the webhook
+       oshibot webhook test      send a test message
+       oshibot webhook off       remove it
+
+To create the URL: Discord > channel > Edit > Integrations > Webhooks > New Webhook > Copy Webhook URL.
+EOF
+      ;;
+    test)
+      [[ -z $WEBHOOK ]] && die "no webhook configured"
+      discord_send "$(loot_payload '{"result":{"boosters":[{"cards":[{"name":"Test card","rarity":"legendary","serial":1,"series_title":"oshibot webhook test","image_url":"https://s4.anilist.co/file/anilistcdn/character/large/3437.jpg","is_new":true,"variant":null}]}]}}')"
+      [[ $HTTP_STATUS == 2* ]] && ok "test message sent"
+      ;;
+    off)
+      rm -f "$CONFIG"; ok "webhook removed"
+      ;;
+    https://discord.com/api/webhooks/* | https://discordapp.com/api/webhooks/* | https://*.discord.com/api/webhooks/*)
+      (umask 077; printf 'WEBHOOK=%q\n' "$url" >"$CONFIG")
+      WEBHOOK=$url
+      ok "webhook saved, try it with: ${B}oshibot webhook test${R}"
+      ;;
+    *) die "invalid Discord webhook URL" ;;
+  esac
+}
+
+cmd_open() {
+  local n=${1:-$MAX_PACKS}
+  [[ $n =~ ^[0-9]+$ ]] && (( n >= 1 && n <= MAX_PACKS )) || die "pack count must be between 1 and $MAX_PACKS"
+  ensure_profile
+  locked_session "$n"
+}
+
+cmd_pause() {
+  local d=${1:-} secs
+  [[ $d =~ ^([0-9]+)([dhm])$ ]] || die "usage: oshibot pause <duration>, for example 3d, 12h or 45m"
+  case ${BASH_REMATCH[2]} in
+    d) secs=$(( BASH_REMATCH[1] * 86400 )) ;;
+    h) secs=$(( BASH_REMATCH[1] * 3600 )) ;;
+    m) secs=$(( BASH_REMATCH[1] * 60 )) ;;
+  esac
+  echo $(( $(now) + secs )) >"$PAUSE"
+  ok "paused until $(date -d "@$(<"$PAUSE")" '+%a %d %b %H:%M') (cancel with: oshibot resume)"
+}
+
+cmd_resume() {
+  local was=""
+  [[ -f $HALT ]] && was="safety stop cleared"
+  [[ -f $PAUSE ]] && was="${was:+$was, }pause cancelled"
+  rm -f "$HALT" "$PAUSE"
+  ok "${was:-nothing to resume}"
+  restart_service
+}
+
+cmd_stats() {
+  local i d total=0
+  load_stats
+  printf '%s%-12s %6s %6s %6s %10s %7s%s\n' "$B" Day Packs Rare Epic Legendary Mythic "$R"
+  for i in 6 5 4 3 2 1 0; do
+    d=$(date -d "@$(( $(now) - i * 86400 ))" +%F)
+    printf '%-12s %6s %6s %6s %10s %7s\n' "$d" "${S_PACKS[$d]:-0}" "${S_RARE[$d]:-0}" "${S_EPIC[$d]:-0}" "${S_LEG[$d]:-0}" "${S_MYTH[$d]:-0}"
+  done
+  for d in "${!S_PACKS[@]}"; do total=$(( total + S_PACKS[$d] )); done
+  echo
+  echo "All time: $total packs over ${#S_PACKS[@]} day(s)"
+}
+
+cmd_status() {
+  local exp left pu next
+  if [[ -f $SESSION ]]; then
+    exp=$(jq -r '.expires_at // 0' "$SESSION"); left=$(( exp - $(now) ))
+    echo "Session : ${GRN}$(jq -r '.user.email // .user.id' "$SESSION")${R} (token $( ((left > 0)) && echo "valid for $((left / 60)) more min" || echo "due for renewal on next run"), renewed automatically)"
+  else
+    echo "Session : ${RED}none${R} (run: oshibot cookie)"
+  fi
+  echo "Browser : $(has_browser && echo "${GRN}$(jq -r '.browser.ua' "$DEVICE" | grep -oE '(Chrome|Firefox|Version)/[0-9]+' | tail -1)${R}, language $(jq -r .browser.accept_language "$DEVICE")" || echo "${YEL}generic${R} (run: oshibot browser)")"
+  echo "Profile : $([[ -n $PRESET ]] && echo "${GRN}$PRESET${R}, sessions every $GAP_MIN to $GAP_MAX min (details: oshibot profile)" || echo "${YEL}not drawn yet${R} (run: oshibot profile <chill|regular|grinder>)")"
+  echo "Webhook : $([[ -n $WEBHOOK ]] && echo "${GRN}configured${R}" || echo "${YEL}not configured${R} (run: oshibot webhook <url>)")"
+  if [[ -f $UNIT ]]; then
+    echo "Service : $(systemctl is-active "$SERVICE" 2>/dev/null)"
+  else
+    echo "Service : ${YEL}not installed${R} (run: oshibot install)"
+  fi
+  [[ -f $HALT ]] && echo "${RED}Stopped${R} : $(<"$HALT") (run: oshibot resume)"
+  pu=$(pause_until)
+  (( pu > $(now) )) && echo "${YEL}Paused${R}  : until $(date -d "@$pu" '+%a %d %b %H:%M') (run: oshibot resume)"
+  next=$(state_get NEXT 0)
+  if [[ -f $UNIT ]] && (( next > $(now) )); then
+    echo "Next    : session at $(date -d "@$next" '+%a %H:%M'), night from $(date -d "@$(state_get BED 0)" +%H:%M) to $(date -d "@$(state_get WAKE 0)" +%H:%M)$([[ $(state_get LIGHT 0) == 1 ]] && echo ', light day')"
+  fi
+  load_stats
+  echo "Today   : $(recap_line "$(date +%F)")"
+}
+
+cmd_install() {
+  (( EUID == 0 )) || die "must be run as root"
+  command -v systemctl >/dev/null || die "systemd not found, run the loop yourself with: oshibot run"
+  [[ -f $SESSION ]] || die "set up the session first: oshibot cookie"
+  ensure_profile
+  fix_owner
+  ln -sf "$DIR/oshibot" /usr/local/bin/oshibot
+  cat >"$UNIT" <<EOF
+[Unit]
+Description=Automatic oshicards free booster opening
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$(stat -c %U "$DIR")
+ExecStart=$DIR/oshibot run
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=2 3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable "$SERVICE" >/dev/null 2>&1
+  systemctl restart "$SERVICE" || die "could not start the service"
+  ok "service running, follow it with: ${B}oshibot logs${R}"
+}
+
+cmd_uninstall() {
+  (( EUID == 0 )) || die "must be run as root"
+  systemctl disable --now "$SERVICE" >/dev/null 2>&1
+  rm -f "$UNIT" /usr/local/bin/oshibot
+  systemctl daemon-reload
+  ok "service removed (session and settings kept in $DIR)"
+}
+
+cmd_setup() {
+  local preset url a
+  [[ -t 0 ]] || die "setup is interactive, run it in a terminal"
+  echo "${B}Step 1/4: account${R}"; echo
+  if [[ -f $SESSION ]]; then
+    read -r -p "A session already exists for $(jq -r '.user.email // .user.id' "$SESSION"). Replace it? [y/N] > " a
+    [[ $a == [yY]* ]] && cmd_cookie
+  else
+    cmd_cookie
+  fi
+  echo; echo "${B}Step 2/4: how much do you want to play?${R}"; echo
+  preset=$(choose_preset 3>&1 >/dev/tty)
+  gen_profile "$preset"
+  ok "${B}$preset${R} profile drawn for this install"
+  echo; echo "${B}Step 3/4: Discord notifications${R}"; echo
+  read -r -p "Webhook URL (Enter to skip) > " url
+  if [[ -n $url ]]; then
+    cmd_webhook "$url" && cmd_webhook test
+  fi
+  echo; echo "${B}Step 4/4: background service${R}"; echo
+  if (( EUID == 0 )) && command -v systemctl >/dev/null; then
+    read -r -p "Install and start the service now? [Y/n] > " a
+    [[ $a == [nN]* ]] || cmd_install
+  else
+    echo "Run ${B}sudo $DIR/oshibot install${R} to start the background loop."
+  fi
+  echo; cmd_status
+}
+
+cmd_help() {
+  cat <<EOF
+${B}oshibot${R}: automatic free booster opening for oshicards
+
+${B}Setup${R}
+  oshibot setup              guided setup: account, play style, Discord, service
+  oshibot cookie [file]      connect your account (step by step guide)
+  oshibot browser [file]     save your browser's identity without changing the session
+  oshibot profile [preset]   show your profile, or draw a new one: chill, regular, grinder
+  oshibot webhook <url>      Discord webhook for legendary and mythic pulls (test, off)
+
+${B}Play${R}
+  oshibot open [n]           play one session now: empty the free stock, or n packs at most
+  oshibot pause <duration>   stop playing for a while, for example 3d, 12h, 45m
+  oshibot resume             cancel a pause, or restart after a safety stop
+  oshibot status             account, profile, next session, today's pulls
+  oshibot stats              packs and rarities over the last 7 days
+
+${B}Service${R}
+  oshibot install            install and start the loop as a systemd service
+  oshibot uninstall          stop and remove the service
+  oshibot logs               follow the service logs
+  oshibot run                run the loop in the foreground
+
+Only free boosters are opened, never gems. The tool stops itself and alerts you
+on Discord if the site answers anything unexpected.
+EOF
+}
+
+main() {
+  local cmd=${1:-help}
+  shift || true
+  trap fix_owner EXIT
+  case $cmd in
+    setup) cmd_setup ;;
+    cookie) cmd_cookie "$@" ;;
+    browser) cmd_browser "$@" ;;
+    profile) cmd_profile "$@" ;;
+    webhook) cmd_webhook "$@" ;;
+    open) cmd_open "$@" ;;
+    pause) cmd_pause "$@" ;;
+    resume) cmd_resume ;;
+    stats) cmd_stats ;;
+    run) cmd_run ;;
+    status) cmd_status ;;
+    install) cmd_install ;;
+    uninstall) cmd_uninstall ;;
+    logs) exec journalctl -u "$SERVICE" -f -n 50 -o cat ;;
+    help | -h | --help) cmd_help ;;
+    *) err "unknown command: $cmd"; cmd_help; exit 1 ;;
+  esac
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi
