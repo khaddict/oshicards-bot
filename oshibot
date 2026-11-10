@@ -963,31 +963,38 @@ cmd_setup() {
 }
 
 cmd_help() {
+  local c=$CYA d=$DIM
   cat <<EOF
-${B}oshibot${R}: automatic free booster opening for oshicards
 
-${B}Setup${R}
-  oshibot setup              guided setup: account, play style, Discord, service
-  oshibot cookie [file]      connect your account (step by step guide)
-  oshibot browser [file]     save your browser's identity without changing the session
-  oshibot profile [preset]   show your profile, or draw a new one: chill, regular, grinder, nonstop
-  oshibot webhook <url>      Discord webhook for legendary and mythic pulls (test, off)
+  ${B}oshibot${R}  auto pack opener for oshicards
+  ${d}Opens your free boosters at a human pace. Never spends gems.${R}
 
-${B}Play${R}
-  oshibot open [n]           play one session now: empty the free stock, or n packs at most
-  oshibot pause <duration>   stop playing for a while, for example 3d, 12h, 45m
-  oshibot resume             cancel a pause, or restart after a safety stop
-  oshibot status             account, profile, next session, today's pulls
-  oshibot stats              packs and rarities over the last 7 days
+  ${B}${YEL}GET STARTED${R}
+    ${c}oshibot setup${R}                 guided setup, runs the four steps below for you
+     ${d}├─${R} ${c}oshibot cookie${R}            ${d}1.${R} connect your account
+     ${d}├─${R} ${c}oshibot profile${R} <preset>  ${d}2.${R} pick a play style: chill, regular, grinder, nonstop
+     ${d}├─${R} ${c}oshibot webhook${R} <url>     ${d}3.${R} Discord alerts for legendary and mythic pulls
+     ${d}└─${R} ${c}oshibot install${R}           ${d}4.${R} start the background service
 
-${B}Service${R}
-  oshibot install            install and start the loop as a systemd service
-  oshibot uninstall          stop and remove the service
-  oshibot logs               follow the service logs
-  oshibot run                run the loop in the foreground
+  ${B}${YEL}EVERY DAY${R}
+    ${c}oshibot status${R}                account, profile, next session, today's pulls
+    ${c}oshibot stats${R}                 packs and rarities over the last 7 days
+    ${c}oshibot open${R} [n]              play one session now (whole free stock, or n packs)
+    ${c}oshibot pause${R} <duration>      take a break: 3d, 12h, 45m
+    ${c}oshibot resume${R}                end a break, or restart after a safety stop
+    ${c}oshibot logs${R}                  follow what the service is doing
 
-Only free boosters are opened, never gems. The tool stops itself and alerts you
-on Discord if the site answers anything unexpected.
+  ${B}${YEL}SETTINGS${R}
+    ${c}oshibot profile${R}               show your current play style
+    ${c}oshibot browser${R}               refresh your browser's identity, keeps the session
+    ${c}oshibot webhook${R} test|off      send a test message, or remove the webhook
+
+  ${B}${YEL}SERVICE${R}
+    ${c}oshibot uninstall${R}             stop and remove the service
+    ${c}oshibot run${R}                   run the loop in the foreground
+
+  ${d}If the site answers anything unexpected, oshibot stops itself and alerts you on Discord.${R}
+
 EOF
 }
 
