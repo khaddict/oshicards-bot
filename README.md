@@ -100,7 +100,7 @@ Figures come from two-week simulations of randomly drawn profiles. The theoretic
 
 `nonstop` has no night break. It keeps the random gaps and pauses, but an account that plays every hour of every day is not a human one, so it is by far the easiest preset to spot. Only use it on an account you do not mind losing.
 
-Free boosters regenerate at one every 10 minutes, up to a stock of 10. Some quests raise that limit (12 on the account used for testing). `oshibot` reads the real stock size and refill rate of your account from the site's answers, so nothing is hardcoded. Emptying the stock just before it is full loses nothing, so even `grinder` never hammers the API.
+Free boosters regenerate at one every 10 minutes, up to a stock of 10. Some quests raise that limit (12 on the account used for testing). `oshibot` reads the real stock size and refill rate of your account from the site's answers, so nothing is hardcoded. Bonus boosters earned from quests are opened too, once the free stock is empty (set `USE_BONUS=0` in the profile to keep them). Emptying the stock just before it is full loses nothing, so even `grinder` never hammers the API.
 
 Switch or redraw at any time with `oshibot profile <preset>`, and see what you got with `oshibot profile`:
 
