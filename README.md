@@ -47,8 +47,9 @@
 - 🛑 **Safety stop.** If the site answers anything unexpected (a block page, an unknown error), the tool stops and alerts you instead of insisting.
 - 🔄 **Self-renewing session.** Paste your cookie once. The access token is refreshed automatically from then on.
 - 📅 **Daily login streak.** Claims the daily login reward at the first session of the day, the same way the site's pages do when they load.
-- 🎯 **"Which is rarer?" mini-game (opt-in).** Plays the daily rewarded game for you, with a random 1 to 5 second pause before each answer.
-- 🔔 **Discord notifications.** Legendary and mythic pulls with the card art, a daily recap, the mini-game score, and an alert if the tool stops.
+- 🎯 **Daily mini-games (opt-in).** Plays "Mystery anime", "Which is rarer?" and "Memory" once a day, with random pauses between answers.
+- ✅ **Missions (opt-in).** Claims daily and weekly missions as soon as they are finished.
+- 🔔 **Discord notifications.** Legendary and mythic pulls with the card art, a daily recap, mini-game scores, claimed missions, and an alert if the tool stops.
 
 ## 📋 Requirements
 
@@ -139,7 +140,8 @@ The profile is a plain `profile` file next to the script. You can edit it freely
 | `oshibot profile [preset]` | Show your profile, or draw a new one |
 | `oshibot webhook <url>` | Set the Discord webhook (`test` to try it, `off` to remove it) |
 | `oshibot open [n]` | Play one session now: empty the free stock, or `n` packs at most |
-| `oshibot rarer` | Play today's "Which is rarer?" mini-game now |
+| `oshibot games [name...]` | Play today's mini-games now: `anime`, `rarer`, `memory` |
+| `oshibot missions` | Claim the missions that are finished |
 | `oshibot pause <duration>` | Stop playing for a while: `3d`, `12h`, `45m` |
 | `oshibot resume` | Cancel a pause, or restart after a safety stop |
 | `oshibot status` | Account, profile, next session, today's pulls |
@@ -173,7 +175,7 @@ Everything lives next to the script and is ignored by git:
 | `profile` | Your schedule and settings |
 | `config` | Discord webhook URL |
 | `history.tsv` | One line per opened pack, used by `stats` |
-| `rarity.tsv` | True rarity of every card the tool has seen, used by the mini-game |
+| `rarity.tsv` | Rarity and anime of every card the tool has seen, used by the mini-games |
 | `state`, `pause`, `halted` | Runtime state |
 
 ## ⚠️ Limitations
@@ -185,18 +187,35 @@ Everything lives next to the script and is ignored by git:
 - **Standard booster only.** The pack type is the `SLUG` setting.
 - **It can break at any time.** The tool relies on private endpoints observed in the browser. A site update may change them.
 
-## 🎯 The "Which is rarer?" mini-game
+## 🎯 Mini-games and missions
 
-Off by default. Set `PLAY_RARER=1` in the profile and `oshibot` plays the rewarded game once a day, after a pack session, at a time of day drawn at random between 09:00 and 20:00 (Paris time). `oshibot rarer` plays it right away.
+Both are off by default. Turn them on in the `profile` file:
 
-How it picks the rarer card:
+```bash
+PLAY_GAMES="anime rarer memory"   # any subset, empty = none
+CLAIM_MISSIONS=1
+```
 
-1. **What it has already seen.** Every card from an opened pack, and both cards revealed after each answer, are saved with their true rarity in `rarity.tsv`. When both cards of a round are known, the answer is certain.
+Once a day, after a pack session, at a time drawn at random between 09:00 and 20:00 (Paris time), `oshibot` plays the rewarded game of each mini-game listed, then claims the missions. `oshibot games` and `oshibot missions` do it right away.
+
+| Game | How it is played | Reward |
+|---|---|---|
+| Mystery anime (`anime`) | The site shows a character. Its card page on the site names its anime, which is the answer. | up to 30 gems |
+| Which is rarer? (`rarer`) | Uses the rarity of cards already seen, else the character's popularity on AniList. One wrong answer ends the game. | 3 gems per correct answer |
+| Memory (`memory`) | Nothing is revealed before a card is flipped, so it remembers every card seen and never flips a known pair wrong. | 25, 15 or 10 gems depending on the number of moves |
+
+The site caps the five mini-games at 50 gems a day in total, which these three usually reach. "Scrambled page", "Duel" and the daily "Who is it?" quiz are not played: they need image analysis or a combat strategy.
+
+About "Which is rarer?":
+
+1. **What it has already seen.** Every card from an opened pack, and every card revealed by a game, is saved with its true rarity in `rarity.tsv`. When both cards of a round are known, the answer is certain.
 2. **Popularity otherwise.** On the site, rarity follows how popular a character is on AniList. The card's image address contains the AniList character id, so `oshibot` asks the public [AniList API](https://anilist.co) for the favourites of both characters and picks the higher one. This is the only request the tool sends to a third party, and it only contains the two character ids.
 
-It is not perfect. A few classics are always Mythic on the site whatever their popularity, and one wrong answer ends the game. Those cards are learned the first time they come up, so the hit rate improves with time. In the first two test games, 17 rounds out of 18 were answered correctly.
+It is not perfect: a few classics are always Mythic on the site whatever their popularity. Those cards are learned the first time they come up, so the hit rate improves with time. In the first three test games, 27 rounds out of 28 were answered correctly.
 
-A daily game played without mistakes is a stronger automation signal than opening packs. Leave it off if you want to stay discreet.
+Missions are claimed when they are finished, whoever finished them. `oshibot` checks the missions page after the games, then every two to four hours after a pack session. It does not do the missions that need a real choice from you, such as bidding at an auction.
+
+Games played without mistakes every day, and rewards claimed within hours, are a stronger automation signal than opening packs. Leave both off if you want to stay discreet.
 
 ## 🩹 The session keeps dying
 

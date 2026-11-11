@@ -39,7 +39,8 @@ CURL_BIN="curl"
 DAILY_RECAP=1
 USE_BONUS=1
 DAILY_LOGIN=1
-PLAY_RARER=0
+PLAY_GAMES=""
+CLAIM_MISSIONS=0
 GAP_MIN=90; GAP_MAX=180
 SKIP_CHANCE=10; SKIP_EXTRA_MIN=45; SKIP_EXTRA_MAX=90
 LIGHT_DAY_CHANCE=10; PARTIAL_CHANCE=10
@@ -179,8 +180,10 @@ DAILY_RECAP=$DAILY_RECAP
 USE_BONUS=$USE_BONUS
 # claim the daily login reward, as the site does from every page it loads
 DAILY_LOGIN=$DAILY_LOGIN
-# play the daily "Which is rarer?" mini-game (asks anilist.co how popular each character is)
-PLAY_RARER=$PLAY_RARER
+# daily mini-games to play, among: anime rarer memory (empty = none)
+PLAY_GAMES="$PLAY_GAMES"
+# claim finished missions
+CLAIM_MISSIONS=$CLAIM_MISSIONS
 CURL_BIN=$CURL_BIN
 EOF
 }
@@ -642,7 +645,7 @@ play_session() {
     log "${B}pack $opened${R}$(jq -r '(if (.result.paid.bonus // 0) > 0 then " (bonus)" else "" end) + (if any(.result.boosters[]; .golden) then " (golden)" else "" end)' <<<"$body")"
     print_cards "$body"
     printf '%s\t%s\n' "$(now)" "$(jq -r '[.result.boosters[].cards[].rarity] | join(",")' <<<"$body")" >>"$HISTORY"
-    jq -r '.result.boosters[].cards[] | [.card_id, .rarity, .name] | @tsv' <<<"$body" 2>/dev/null | learn_rarities
+    jq -r '.result.boosters[].cards[] | [.card_id, .rarity, .name, (.series_title // "")] | @tsv' <<<"$body" 2>/dev/null | learn_cards
     payload=$(loot_payload "$body")
     [[ -n $payload ]] && discord_send "$payload"
 
@@ -684,7 +687,7 @@ locked() {
 
 locked_session() { locked play_session "$1"; }
 
-# ---------- mini-game: which is rarer? ----------
+# ---------- mini-games ----------
 
 paris_day() { TZ=Europe/Paris date -d "@$(now)" +%F; }
 
@@ -692,6 +695,36 @@ paris_day() { TZ=Europe/Paris date -d "@$(now)" +%F; }
 card_id_of() {
   local base=${1##*/}
   [[ $base =~ ^[a-z]?([0-9]+) ]] && echo "${BASH_REMATCH[1]}"
+}
+
+# Every card seen (opened packs, cards revealed by the games) is kept locally with its
+# true rarity and anime: popularity alone misses the classics the site always makes Mythic.
+rarity_rank() {
+  case $1 in
+    common) echo 1 ;; uncommon) echo 2 ;; rare) echo 3 ;; epic) echo 4 ;; legendary) echo 5 ;; mythic) echo 6 ;;
+    *) echo 0 ;;
+  esac
+}
+
+known_rarity() {
+  [[ -f $RARITIES ]] || return 0
+  awk -F'\t' -v id="$1" '$1 == id { r = $2 } END { print r }' "$RARITIES"
+}
+
+known_series() {
+  [[ -f $RARITIES ]] || return 0
+  awk -F'\t' -v id="$1" '$1 == id && $4 != "" { r = $4 } END { print r }' "$RARITIES"
+}
+
+# reads "id<TAB>rarity<TAB>name<TAB>anime" lines on stdin
+learn_cards() {
+  local id rar name series
+  while IFS=$'\t' read -r id rar name series; do
+    [[ $id =~ ^[0-9]+$ ]] && (( $(rarity_rank "$rar") > 0 )) || continue
+    if [[ $(known_rarity "$id") != "$rar" || ( -n $series && $(known_series "$id") != "$series" ) ]]; then
+      printf '%s\t%s\t%s\t%s\n' "$id" "$rar" "$name" "$series" >>"$RARITIES"
+    fi
+  done
 }
 
 # prints the AniList favourites of characters $1 and $2 ("" when unknown). Rarity follows popularity.
@@ -707,81 +740,103 @@ anilist_favs() {
     | "\(first($c[] | select(.id == $a) | .favourites) // "") \(first($c[] | select(.id == $b) | .favourites) // "")"' <<<"$out" 2>/dev/null
 }
 
-# The true rarity of every card seen (opened packs, answers revealed by the game) is kept
-# locally: popularity alone misses the few classics that the site always makes Mythic.
-rarity_rank() {
-  case $1 in
-    common) echo 1 ;; uncommon) echo 2 ;; rare) echo 3 ;; epic) echo 4 ;; legendary) echo 5 ;; mythic) echo 6 ;;
-    *) echo 0 ;;
-  esac
+# the anime of card $1, as the site names it: from the local file, else from the card's page
+series_of() {
+  local id=$1 title
+  title=$(known_series "$id")
+  if [[ -z $title ]]; then
+    title=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H "$(cookie_header)" -H 'Accept: text/html' \
+      -H "Referer: $SITE$G_PATH" --compressed "$SITE/$LOCALE/card/$id" 2>/dev/null |
+      grep -oP '\\"series_title\\":\\"\K.*?(?=\\",)' | head -1)
+    [[ -n $title ]] && title=$(printf '"%s"' "$title" | jq -r . 2>/dev/null)
+  fi
+  echo "$title"
 }
 
-known_rarity() {
-  [[ -f $RARITIES ]] || return 0
-  awk -F'\t' -v id="$1" '$1 == id { r = $2 } END { print r }' "$RARITIES"
-}
+G_PLAY=""
+G_HTML=""
+G_PATH=""
+GAMES_SUMMARY=""
+pj() { jq -r "$1" <<<"$G_PLAY" 2>/dev/null; }
 
-# reads "id<TAB>rarity<TAB>name" lines on stdin
-learn_rarities() {
-  local id rar name
-  while IFS=$'\t' read -r id rar name; do
-    [[ $id =~ ^[0-9]+$ ]] && (( $(rarity_rank "$rar") > 0 )) || continue
-    [[ $(known_rarity "$id") == "$rar" ]] || printf '%s\t%s\t%s\n' "$id" "$rar" "$name" >>"$RARITIES"
-  done
-}
-
-# plays today's rewarded game ($1 = free: a replay with no reward). 0 = done or skipped, 2 = dead session, 3 = safety stop
-play_rarer() {
-  local path="/$LOCALE/games/rarer" html esc played play pid rc round ida idb fa fb ra rb pick how last free=${1:-}
+# Opens the page of game $1 and gets today's rewarded play ready in G_PLAY ($2 = free: a replay
+# with no reward). 0 = ready, 1 = nothing to play, 2 = dead session, 3 = safety stop
+game_begin() {
+  local game=$1 free=${2:-} rc esc played
+  G_PATH="/$LOCALE/games/$game"; G_PLAY=""; G_HTML=""
   if [[ -f $HALT ]]; then
     err "stopped earlier: $(<"$HALT") (run: ${B}oshibot resume${R})"; return 3
   fi
   load_browser
   ensure_session; rc=$?
   (( rc == 2 )) && return 2
-  (( rc == 1 )) && { warn "network unavailable, game postponed"; return 0; }
+  (( rc == 1 )) && { warn "network unavailable, game postponed"; return 1; }
 
-  visit_page "$path"
-  html=$PAGE_HTML
+  visit_page "$G_PATH"
+  G_HTML=$PAGE_HTML
   case $PAGE_CODE in
     200) ;;
-    403 | 429) rm -f "$html"; halt "the game page answered HTTP $PAGE_CODE, the site may be blocking this tool"; return 3 ;;
-    *) rm -f "$html"; warn "game page unreachable ($PAGE_CODE), game postponed"; return 0 ;;
+    403 | 429) halt "the game page answered HTTP $PAGE_CODE, the site may be blocking this tool"; return 3 ;;
+    *) warn "game page unreachable ($PAGE_CODE), game postponed"; return 1 ;;
   esac
   LAST_PING=0
   presence_ping
 
   # the page carries the state of today's game: finished, in progress, or not started
-  esc=$(grep -oP '\\"game\\":\\"rarer\\",\\"gems\\":\d+,\\"play\\":\K.*?(?=,\\"played\\":(true|false))' "$html" | head -1)
-  played=$(grep -oP '\\"game\\":\\"rarer\\",\\"gems\\":\d+,\\"play\\":.*?,\\"played\\":\K(true|false)' "$html" | head -1)
-  play=""
-  [[ -n $esc && $esc != null ]] && play=$(printf '"%s"' "$esc" | jq -r . 2>/dev/null | jq -c . 2>/dev/null)
-  if [[ -z $free && $played == true && ( -z $play || $(jq -r '.finished' <<<"$play") == true ) ]]; then
-    state_set RARER_DAY "$(paris_day)"
-    log "which is rarer: already played today"
-    rm -f "$html"; return 0
+  esc=$(grep -oP '\\"game\\":\\"'"$game"'\\",\\"gems\\":\d+,\\"play\\":\K.*?(?=,\\"played\\":(true|false))' "$G_HTML" | head -1)
+  played=$(grep -oP '\\"game\\":\\"'"$game"'\\",\\"gems\\":\d+,\\"play\\":.*?,\\"played\\":\K(true|false)' "$G_HTML" | head -1)
+  [[ -n $esc && $esc != null ]] && G_PLAY=$(printf '"%s"' "$esc" | jq -r . 2>/dev/null | jq -c . 2>/dev/null)
+  [[ -n $G_PLAY && $(pj .finished) == true ]] && G_PLAY=""
+  if [[ -z $free && $played == true && -z $G_PLAY ]]; then
+    state_set "GAME_${game}_DAY" "$(paris_day)"
+    log "$game: already played today"; return 1
   fi
-  if [[ -z $play || $(jq -r '.finished' <<<"$play") == true ]]; then
+  if [[ -z $G_PLAY ]]; then
     idle "$(rand 2 5)"
-    if ! call_action gameStartAction "$path" '["rarer"]' "$html"; then
-      warn "which is rarer: could not start a game (HTTP $ACT_STATUS)"; rm -f "$html"; return 0
+    if ! call_action gameStartAction "$G_PATH" "$(jq -nc --arg g "$game" '[$g]')" "$G_HTML"; then
+      if [[ $ACT_STATUS == 403 || $ACT_STATUS == 429 ]]; then
+        halt "starting a game answered HTTP $ACT_STATUS, the site may be blocking this tool"; return 3
+      fi
+      warn "$game: could not start a game (HTTP $ACT_STATUS)"; return 1
     fi
-    play=$(jq -c '.play // empty' <<<"$ACT_BODY" 2>/dev/null)
-    if [[ -z $play ]]; then
-      warn "which is rarer: $(jq -r '.error // "no game returned"' <<<"$ACT_BODY" 2>/dev/null)"; rm -f "$html"; return 0
+    G_PLAY=$(jq -c '.play // empty' <<<"$ACT_BODY" 2>/dev/null)
+    if [[ -z $G_PLAY ]]; then
+      warn "$game: $(jq -r '.error // "no game returned"' <<<"$ACT_BODY" 2>/dev/null)"; return 1
     fi
   fi
-  if [[ -z $free && $(jq -r '.rewarded' <<<"$play") != true ]]; then
-    state_set RARER_DAY "$(paris_day)"
-    log "which is rarer: today's rewarded game is already used"
-    rm -f "$html"; return 0
+  if [[ -z $free && $(pj .rewarded) != true ]]; then
+    state_set "GAME_${game}_DAY" "$(paris_day)"
+    log "$game: today's rewarded game is already used"; return 1
   fi
+  return 0
+}
 
-  pid=$(jq -r '.id' <<<"$play")
+# sends answer $1 for the current play and loads the new state; 1 when the site refuses it
+game_answer() {
+  local next game
+  game=$(pj .game)
+  if ! call_action gameAnswerAction "$G_PATH" "$(jq -nc --argjson id "$(pj .id)" --arg a "$1" '[$id, $a]')" "$G_HTML"; then
+    if [[ $ACT_STATUS == 403 || $ACT_STATUS == 429 ]]; then
+      halt "a game answer got HTTP $ACT_STATUS, the site may be blocking this tool"
+    else
+      warn "$game: answer refused (HTTP $ACT_STATUS), game left for later"
+    fi
+    return 1
+  fi
+  next=$(jq -c '.play // empty' <<<"$ACT_BODY" 2>/dev/null)
+  if [[ -z $next ]]; then
+    warn "$game: $(jq -r '.error // "no answer returned"' <<<"$ACT_BODY" 2>/dev/null)"; return 1
+  fi
+  G_PLAY=$next
+}
+
+# "Which is rarer?": ten rounds of two cards, one wrong answer ends the game
+game_rarer() {
+  local round ida idb fa fb ra rb pick how names
   for ((round = 1; round <= 30; round++)); do
-    [[ $(jq -r '.finished' <<<"$play") == true ]] && break
-    ida=$(card_id_of "$(jq -r '.cards[0].image_url // ""' <<<"$play")")
-    idb=$(card_id_of "$(jq -r '.cards[1].image_url // ""' <<<"$play")")
+    [[ $(pj .finished) == true ]] && break
+    ida=$(card_id_of "$(pj '.cards[0].image_url // ""')")
+    idb=$(card_id_of "$(pj '.cards[1].image_url // ""')")
     ra=$(rarity_rank "$(known_rarity "${ida:-0}")")
     rb=$(rarity_rank "$(known_rarity "${idb:-0}")")
     fa=""; fb=""
@@ -794,49 +849,221 @@ play_rarer() {
     else
       [[ -n $ida && -n $idb ]] && read -r fa fb < <(anilist_favs "$ida" "$idb")
       if [[ ! $fa =~ ^[0-9]+$ || ! $fb =~ ^[0-9]+$ ]]; then
-        warn "which is rarer: popularity unknown for this pair, game left for later"
-        rm -f "$html"; return 0
+        warn "rarer: popularity unknown for this pair, game left for later"; return 0
       fi
       how="$fa vs $fb favourites"
       pick=0; (( fb > fa )) && pick=1
     fi
+    names="$(pj '.cards | map(.name) | join(" vs ")'), picked $(pj ".cards[$pick].name")"
     idle "$(rand 1 5)"
-    if ! call_action gameAnswerAction "$path" "$(jq -nc --argjson id "$pid" --arg p "$pick" '[$id, $p]')" "$html"; then
-      warn "which is rarer: answer refused (HTTP $ACT_STATUS), game left for later"; rm -f "$html"; return 0
-    fi
-    last=$(jq -c '.play // empty' <<<"$ACT_BODY" 2>/dev/null)
-    if [[ -z $last ]]; then
-      warn "which is rarer: $(jq -r '.error // "no answer returned"' <<<"$ACT_BODY" 2>/dev/null)"; rm -f "$html"; return 0
-    fi
-    log "which is rarer, round $round: $(jq -r '.cards | map(.name) | join(" vs ")' <<<"$play"), picked $(jq -r --argjson i "$pick" '.cards[$i].name' <<<"$play") ($how) $([[ $(jq -r '.last.correct' <<<"$last") == true ]] && echo "${GRN}correct${R}" || echo "${RED}wrong${R}")"
-    play=$last
-    jq -r '.last.cards // [] | .[] | select(.rarity != null)
-      | [(.card_id // (.image_url // "" | split("/") | last | capture("^[a-z]?(?<n>[0-9]+)").n)), .rarity, .name] | @tsv' <<<"$play" 2>/dev/null | learn_rarities
+    game_answer "$pick" || return 0
+    log "rarer, round $round: $names ($how) $([[ $(pj .last.correct) == true ]] && echo "${GRN}correct${R}" || echo "${RED}wrong${R}")"
+    pj '.last.cards // [] | .[] | select(.rarity != null) | [.card_id, .rarity, .name, (.series_title // "")] | @tsv' | learn_cards
   done
-  rm -f "$html"
-  if [[ $(jq -r '.finished' <<<"$play") == true ]]; then
-    if [[ -z $free ]]; then
-      state_set RARER_DAY "$(paris_day)"
-      state_set RARER_RESULT "$(jq -r '"\(.score // 0)/\(.rounds // 10), +\(.gems // 0) gems"' <<<"$play")"
-      discord_text "\"Which is rarer?\" played today: $(jq -r '"score \(.score // 0)/\(.rounds // 10), +\(.gems // 0) gems"' <<<"$play")."
+}
+
+# "Mystery anime": name the anime of the character shown, up to three clues
+game_anime() {
+  local try n id title answer
+  for ((try = 1; try <= 6; try++)); do
+    [[ $(pj .finished) == true ]] && break
+    n=$(pj '.clues | length')
+    id=$(card_id_of "$(pj ".clues[$((n - 1))].image_url // \"\"")")
+    title=""
+    [[ -n $id ]] && title=$(series_of "$id")
+    answer=$title
+    # an answer already refused is not tried twice: ask for the next clue instead
+    [[ -n $answer ]] && pj '.log // [] | .[]' | grep -qixF -- "$answer" && answer=""
+    idle "$(rand 4 9)"
+    game_answer "$answer" || return 0
+    if [[ -z $answer ]]; then
+      log "anime, clue $n ($(pj ".clues[$((n - 1))].name")): anime unknown, next clue"
+    else
+      log "anime, clue $n: answered \"$answer\" $([[ $(pj .last.correct) == true ]] && echo "${GRN}correct${R}" || echo "${RED}wrong${R}")"
     fi
-    ok "which is rarer: $(jq -r '"\(.score // 0)/\(.rounds // 10), +\(.gems // 0) gems"' <<<"$play")"
+  done
+  pj '.clues // [] | .[] | select(.rarity != null) | [.card_id, .rarity, .name, (.series_title // "")] | @tsv' | learn_cards
+}
+
+# "Memory": six pairs face down. Nothing is revealed before a card is flipped, so it is played
+# by remembering every card seen.
+game_memory() {
+  local -A seen=()
+  local size guard=0 first second card p found
+  size=$(pj '.size // 12')
+
+  memory_flip() {
+    idle "$(rand 1 3)"
+    game_answer "$1" || return 1
+    card=$(pj '.last.card.image_url // ""')
+    [[ -n $card ]] && seen[$1]=$card
+    return 0
+  }
+  # a position still face down: $1 = unseen | any, $2 = position to avoid
+  memory_pick() {
+    local q
+    for q in $(shuf -i "0-$((size - 1))"); do
+      [[ $found == *" $q "* || $q == "${2:-}" ]] && continue
+      [[ $1 == unseen && -n ${seen[$q]:-} ]] && continue
+      echo "$q"; return 0
+    done
+    return 1
+  }
+  # the position of a remembered card equal to $1, other than position $2
+  memory_twin() {
+    local q
+    for q in "${!seen[@]}"; do
+      [[ $q != "$2" && $found != *" $q "* && ${seen[$q]} == "$1" ]] && { echo "$q"; return 0; }
+    done
+    return 1
+  }
+
+  while [[ $(pj .finished) != true ]] && (( guard++ < 60 )); do
+    found=" $(pj '.found // [] | join(" ")') "
+    first=$(pj '.open // empty')
+    if [[ -z $first ]]; then
+      # flip a remembered pair when there is one, else discover a new card
+      first=""
+      for p in "${!seen[@]}"; do
+        [[ $found == *" $p "* ]] && continue
+        if memory_twin "${seen[$p]}" "$p" >/dev/null; then first=$p; break; fi
+      done
+      [[ -z $first ]] && first=$(memory_pick unseen) || true
+      [[ -z $first ]] && first=$(memory_pick any) || true
+      [[ -z $first ]] && break
+      memory_flip "$first" || return 0
+      [[ $(pj .finished) == true ]] && break
+    fi
+    second=""
+    [[ -n ${seen[$first]:-} ]] && second=$(memory_twin "${seen[$first]}" "$first") || true
+    [[ -z $second ]] && second=$(memory_pick unseen "$first") || true
+    [[ -z $second ]] && second=$(memory_pick any "$first") || true
+    [[ -z $second ]] && break
+    memory_flip "$second" || return 0
+  done
+  log "memory: $(pj '"\(.found // [] | length / 2 | floor) pairs found in \(.moves // .step) moves"')"
+}
+
+game_result() {
+  case $1 in
+    rarer) pj '"\(.score // 0)/\(.rounds // 10), +\(.gems // 0) gems"' ;;
+    anime) pj '(if .won then "found at clue \((.step // 0) + 1)" else "missed" end) + ", +\(.gems // 0) gems"' ;;
+    memory) pj '"\(.moves // .step) moves, +\(.gems // 0) gems"' ;;
+  esac
+}
+
+# plays one game. 0 = done or skipped, 2 = dead session, 3 = safety stop
+play_game() {
+  local game=$1 free=${2:-} rc result
+  game_begin "$game" "$free"; rc=$?
+  if (( rc == 0 )); then
+    "game_$game"
+    if [[ $(pj .finished) == true ]]; then
+      result=$(game_result "$game")
+      ok "$game: $result"
+      if [[ -z $free ]]; then
+        state_set "GAME_${game}_DAY" "$(paris_day)"
+        state_set "GAME_${game}_RESULT" "$result"
+        GAMES_SUMMARY+="${GAMES_SUMMARY:+; }$game $result"
+      fi
+    fi
   fi
+  [[ -n $G_HTML ]] && rm -f "$G_HTML"
+  [[ -f $HALT ]] && return 3
+  (( rc >= 2 )) && return $rc
   return 0
 }
 
-# true when today's game is still to play and its random time of day has come
-rarer_due() {
-  (( PLAY_RARER )) || return 1
-  local today
+# plays the games given ($@, default PLAY_GAMES) that are still to play today; "free" = unrewarded replays
+play_games() {
+  local a g free="" rc=0 first=1
+  local -a list=()
+  for a in "$@"; do
+    case $a in
+      free) free=free ;;
+      anime | rarer | memory) list+=("$a") ;;
+      *) die "unknown game: $a (anime, rarer or memory)" ;;
+    esac
+  done
+  (( ${#list[@]} )) || read -r -a list <<<"${PLAY_GAMES:-anime rarer memory}"
+  GAMES_SUMMARY=""
+  for g in "${list[@]}"; do
+    [[ -z $free && $(state_get "GAME_${g}_DAY" "") == "$(paris_day)" ]] && continue
+    (( first )) || sleep "$(rand 15 60)"
+    first=0
+    play_game "$g" "$free"; rc=$?
+    (( rc >= 2 )) && break
+  done
+  [[ -n $GAMES_SUMMARY ]] && discord_text "Mini-games played today: $GAMES_SUMMARY."
+  if (( rc == 0 && CLAIM_MISSIONS )) && [[ -z $free ]]; then
+    sleep "$(rand 5 20)"
+    claim_missions; rc=$?
+  fi
+  return $rc
+}
+
+# true when a game is still to play today and its random time of day has come
+games_due() {
+  [[ -n $PLAY_GAMES ]] || return 1
+  local today g todo=0
   today=$(paris_day)
-  [[ $(state_get RARER_DAY "") == "$today" ]] && return 1
+  for g in $PLAY_GAMES; do
+    [[ $(state_get "GAME_${g}_DAY" "") == "$today" ]] || todo=1
+  done
+  (( todo )) || return 1
   if [[ $(state_get GAME_DAY "") != "$today" ]]; then
     state_set GAME_DAY "$today"
     state_set GAME_AT $(( $(TZ=Europe/Paris date -d "$today 00:00" +%s) + $(rand 32400 72000) ))
   fi
   (( $(now) >= $(state_get GAME_AT 0) ))
 }
+
+# ---------- missions ----------
+
+# claims every mission that is finished and not claimed yet. 0 = ok, 2 = dead session, 3 = safety stop
+claim_missions() {
+  local path="/$LOCALE/missions" html rc code n=0 gems=0 bonus=0 g b e
+  if [[ -f $HALT ]]; then
+    err "stopped earlier: $(<"$HALT") (run: ${B}oshibot resume${R})"; return 3
+  fi
+  load_browser
+  ensure_session; rc=$?
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) && return 0
+  visit_page "$path"
+  html=$PAGE_HTML
+  state_set MISSIONS_NEXT $(( $(now) + $(rand 7200 14400) ))
+  case $PAGE_CODE in
+    200) ;;
+    403 | 429) rm -f "$html"; halt "the missions page answered HTTP $PAGE_CODE, the site may be blocking this tool"; return 3 ;;
+    *) rm -f "$html"; warn "missions page unreachable ($PAGE_CODE)"; return 0 ;;
+  esac
+  for code in $(grep -oP '\{\\"code\\":\\"\K[a-z0-9_]+(?=\\",\\"done\\":true,[^{}]*?\\"claimed\\":false)' "$html" | sort -u); do
+    idle "$(rand 1 4)"
+    if ! call_action claimMissionAction "$path" "$(jq -nc --arg c "$code" '[$c]')" "$html"; then
+      warn "mission $code: claim refused (HTTP $ACT_STATUS)"; continue
+    fi
+    e=$(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null)
+    if [[ -n $e ]]; then
+      warn "mission $code: $e"; continue
+    fi
+    g=$(jq -r '.gems // 0' <<<"$ACT_BODY" 2>/dev/null); b=$(jq -r '.bonus // 0' <<<"$ACT_BODY" 2>/dev/null)
+    [[ $g =~ ^[0-9]+$ ]] || g=0
+    [[ $b =~ ^[0-9]+$ ]] || b=0
+    ok "mission claimed: $code, +$g gems$( ((b > 0)) && echo ", +$b bonus booster(s)")"
+    n=$((n + 1)); gems=$((gems + g)); bonus=$((bonus + b))
+  done
+  rm -f "$html"
+  if (( n > 0 )); then
+    (( bonus > 0 )) && state_set BONUS $(( $(state_get BONUS 0) + bonus ))
+    discord_text "Missions claimed: $n, +$gems gems$( ((bonus > 0)) && echo ", +$bonus bonus booster(s)")."
+  else
+    log "missions: nothing to claim"
+  fi
+  return 0
+}
+
+missions_due() { (( CLAIM_MISSIONS )) && (( $(now) >= $(state_get MISSIONS_NEXT 0) )); }
 
 # ---------- schedule ----------
 
@@ -960,9 +1187,12 @@ cmd_run() {
     want=$(max_packs)
     (( want > 4 && $(rand 1 100) <= PARTIAL_CHANCE )) && want=$(rand 3 $(( want * 3 / 4 )))
     locked_session "$want"; rc=$?
-    if (( rc == 0 )) && rarer_due; then
+    if (( rc == 0 )) && games_due; then
       sleep "$(rand 8 45)"
-      locked play_rarer; rc=$?
+      locked play_games; rc=$?
+    elif (( rc == 0 )) && missions_due; then
+      sleep "$(rand 5 30)"
+      locked claim_missions; rc=$?
     fi
     case $rc in
       2)
@@ -1171,7 +1401,14 @@ cmd_status() {
   echo "Profile : $([[ -n $PRESET ]] && echo "${GRN}$PRESET${R}, sessions every $GAP_MIN to $GAP_MAX min (details: oshibot profile)" || echo "${YEL}not drawn yet${R} (run: oshibot profile <chill|regular|grinder|nonstop>)")"
   echo "Stock   : $([[ -n $(state_get FREE_MAX "") ]] && echo "up to $(max_packs) free boosters, one every $(regen_minutes) min, $(state_get BONUS 0) bonus left (read from your account)" || echo "not known yet, read from the site at the first opening")"
   echo "Login   : $([[ -n $(state_get LOGIN_DAY "") ]] && echo "streak day $(state_get LOGIN_DAY ""), $([[ $(state_get LOGIN_DATE "") == "$(date +%F)" ]] && echo "${GRN}claimed today${R}" || echo "not claimed yet today")" || echo "not known yet")"
-  (( PLAY_RARER )) && echo "Game    : which is rarer, $([[ $(state_get RARER_DAY "") == "$(paris_day)" ]] && echo "${GRN}played today${R}${DIM}$(r=$(state_get RARER_RESULT ""); echo "${r:+ ($r)}")${R}" || echo "not played yet today")"
+  if [[ -n $PLAY_GAMES ]]; then
+    local g line=""
+    for g in $PLAY_GAMES; do
+      line+="${line:+ | }$g: $([[ $(state_get "GAME_${g}_DAY" "") == "$(paris_day)" ]] && echo "${GRN}$(state_get "GAME_${g}_RESULT" "played")${R}" || echo "to play")"
+    done
+    echo "Games   : $line"
+  fi
+  (( CLAIM_MISSIONS )) && echo "Missions: claimed automatically, next check $(n=$(state_get MISSIONS_NEXT 0); ((n > $(now))) && date -d "@$n" +%H:%M || echo "at the next session")"
   echo "Webhook : $([[ -n $WEBHOOK ]] && echo "${GRN}configured${R}" || echo "${YEL}not configured${R} (run: oshibot webhook <url>)")"
   if [[ -f $UNIT ]]; then
     echo "Service : $(systemctl is-active "$SERVICE" 2>/dev/null)"
@@ -1273,7 +1510,8 @@ cmd_help() {
     ${c}oshibot status${R}                account, profile, next session, today's pulls
     ${c}oshibot stats${R}                 packs and rarities over the last 7 days
     ${c}oshibot open${R} [n]              play one session now (whole free stock, or n packs)
-    ${c}oshibot rarer${R}                 play today's "Which is rarer?" mini-game now
+    ${c}oshibot games${R} [name...]       play today's mini-games now: anime, rarer, memory
+    ${c}oshibot missions${R}              claim the missions that are finished
     ${c}oshibot pause${R} <duration>      take a break: 3d, 12h, 45m
     ${c}oshibot resume${R}                end a break, or restart after a safety stop
     ${c}oshibot logs${R}                  follow what the service is doing
@@ -1303,7 +1541,8 @@ main() {
     profile) cmd_profile "$@" ;;
     webhook) cmd_webhook "$@" ;;
     open) cmd_open "$@" ;;
-    rarer) ensure_profile; locked play_rarer "$@" ;;
+    games) ensure_profile; locked play_games "$@" ;;
+    missions) ensure_profile; locked claim_missions ;;
     pause) cmd_pause "$@" ;;
     resume) cmd_resume ;;
     stats) cmd_stats ;;
