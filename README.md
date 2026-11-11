@@ -47,7 +47,8 @@
 - 🛑 **Safety stop.** If the site answers anything unexpected (a block page, an unknown error), the tool stops and alerts you instead of insisting.
 - 🔄 **Self-renewing session.** Paste your cookie once. The access token is refreshed automatically from then on.
 - 📅 **Daily login streak.** Claims the daily login reward at the first session of the day, the same way the site's pages do when they load.
-- 🔔 **Discord notifications.** Legendary and mythic pulls with the card art, a daily recap, and an alert if the tool stops.
+- 🎯 **"Which is rarer?" mini-game (opt-in).** Plays the daily rewarded game for you, with a random 1 to 5 second pause before each answer.
+- 🔔 **Discord notifications.** Legendary and mythic pulls with the card art, a daily recap, the mini-game score, and an alert if the tool stops.
 
 ## 📋 Requirements
 
@@ -138,6 +139,7 @@ The profile is a plain `profile` file next to the script. You can edit it freely
 | `oshibot profile [preset]` | Show your profile, or draw a new one |
 | `oshibot webhook <url>` | Set the Discord webhook (`test` to try it, `off` to remove it) |
 | `oshibot open [n]` | Play one session now: empty the free stock, or `n` packs at most |
+| `oshibot rarer` | Play today's "Which is rarer?" mini-game now |
 | `oshibot pause <duration>` | Stop playing for a while: `3d`, `12h`, `45m` |
 | `oshibot resume` | Cancel a pause, or restart after a safety stop |
 | `oshibot status` | Account, profile, next session, today's pulls |
@@ -171,6 +173,7 @@ Everything lives next to the script and is ignored by git:
 | `profile` | Your schedule and settings |
 | `config` | Discord webhook URL |
 | `history.tsv` | One line per opened pack, used by `stats` |
+| `rarity.tsv` | True rarity of every card the tool has seen, used by the mini-game |
 | `state`, `pause`, `halted` | Runtime state |
 
 ## ⚠️ Limitations
@@ -181,6 +184,19 @@ Everything lives next to the script and is ignored by git:
 - **Sessions can be revoked.** If the site ends the session, the service stops and tells you on Discord. Run `oshibot cookie` again. See the next section if it keeps happening.
 - **Standard booster only.** The pack type is the `SLUG` setting.
 - **It can break at any time.** The tool relies on private endpoints observed in the browser. A site update may change them.
+
+## 🎯 The "Which is rarer?" mini-game
+
+Off by default. Set `PLAY_RARER=1` in the profile and `oshibot` plays the rewarded game once a day, after a pack session, at a time of day drawn at random between 09:00 and 20:00 (Paris time). `oshibot rarer` plays it right away.
+
+How it picks the rarer card:
+
+1. **What it has already seen.** Every card from an opened pack, and both cards revealed after each answer, are saved with their true rarity in `rarity.tsv`. When both cards of a round are known, the answer is certain.
+2. **Popularity otherwise.** On the site, rarity follows how popular a character is on AniList. The card's image address contains the AniList character id, so `oshibot` asks the public [AniList API](https://anilist.co) for the favourites of both characters and picks the higher one. This is the only request the tool sends to a third party, and it only contains the two character ids.
+
+It is not perfect. A few classics are always Mythic on the site whatever their popularity, and one wrong answer ends the game. Those cards are learned the first time they come up, so the hit rate improves with time. In the first two test games, 17 rounds out of 18 were answered correctly.
+
+A daily game played without mistakes is a stronger automation signal than opening packs. Leave it off if you want to stay discreet.
 
 ## 🩹 The session keeps dying
 

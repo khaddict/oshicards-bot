@@ -17,6 +17,7 @@ STATE="$DIR/state"
 HISTORY="$DIR/history.tsv"
 PAUSE="$DIR/pause"
 HALT="$DIR/halted"
+RARITIES="$DIR/rarity.tsv"
 LOCK="$DIR/.lock"
 
 REF="dxfbhiodyzhizffghkoi"
@@ -38,6 +39,7 @@ CURL_BIN="curl"
 DAILY_RECAP=1
 USE_BONUS=1
 DAILY_LOGIN=1
+PLAY_RARER=0
 GAP_MIN=90; GAP_MAX=180
 SKIP_CHANCE=10; SKIP_EXTRA_MIN=45; SKIP_EXTRA_MAX=90
 LIGHT_DAY_CHANCE=10; PARTIAL_CHANCE=10
@@ -177,6 +179,8 @@ DAILY_RECAP=$DAILY_RECAP
 USE_BONUS=$USE_BONUS
 # claim the daily login reward, as the site does from every page it loads
 DAILY_LOGIN=$DAILY_LOGIN
+# play the daily "Which is rarer?" mini-game (asks anilist.co how popular each character is)
+PLAY_RARER=$PLAY_RARER
 CURL_BIN=$CURL_BIN
 EOF
 }
@@ -367,64 +371,86 @@ cookie_header() {
 
 PAGE_CODE=000
 PAGE_HTML=""
+# loads a page of the site like a browser tab would; $1 = path, default the pack page
 visit_page() {
-  local hdr
+  local hdr path=${1:-/$LOCALE/open/$SLUG}
   hdr=$(mktemp)
   PAGE_HTML=$(mktemp)
   PAGE_CODE=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H "$(cookie_header)" \
     -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8' \
     -H 'sec-fetch-dest: document' -H 'sec-fetch-mode: navigate' -H 'sec-fetch-site: none' \
     -H 'upgrade-insecure-requests: 1' --compressed \
-    -D "$hdr" -o "$PAGE_HTML" -w '%{http_code}' "$SITE/$LOCALE/open/$SLUG" 2>/dev/null) || PAGE_CODE=000
+    -D "$hdr" -o "$PAGE_HTML" -w '%{http_code}' "$SITE$path" 2>/dev/null) || PAGE_CODE=000
   [[ $PAGE_CODE == 200 ]] && save_site_cookies "$hdr"
   rm -f "$hdr"
 }
 
-# The site's pages claim the daily login reward by themselves when they load.
-# Its action id changes with every site update, so it is read from the page's scripts.
-daily_login() {
-  local html=$1 id chunk url found out line bonus
-  (( DAILY_LOGIN )) || return 0
-  id=$(state_get CLAIM_ID "")
-  chunk=$(state_get CLAIM_CHUNK "")
-  if [[ -z $id || -z $chunk ]] || ! grep -qF "$chunk" "$html"; then
-    id=""
-    for url in $(grep -oE '/_next/static/[^"\\ ?]+\.js(\?dpl=[A-Za-z0-9_.-]+)?' "$html" | sort -u); do
-      found=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H 'Accept: */*' -H "Referer: $SITE/$LOCALE/open/$SLUG" \
-        -H 'sec-fetch-dest: script' -H 'sec-fetch-mode: no-cors' -H 'sec-fetch-site: same-origin' --compressed \
-        "$SITE$url" 2>/dev/null |
-        grep -oE '"[0-9a-f]{42}",[A-Za-z_$]+\.callServer,void 0,[A-Za-z_$]+\.findSourceMapURL,"claimDailyLogin"' | head -1)
-      if [[ -n $found ]]; then
-        id=${found:1:42}; chunk=${url%%\?*}
-        break
-      fi
-    done
-    if [[ -z $id ]]; then
-      warn "daily login: not found in the site's code, skipped"; return 0
-    fi
-    state_set CLAIM_ID "$id"; state_set CLAIM_CHUNK "$chunk"
+# ---------- server actions ----------
+
+# The site's buttons call "server actions" whose ids change with every site update.
+# Prints the id of action $1, read from the scripts of the page saved in $2.
+find_action() {
+  local name=$1 html=$2 cached id chunk url found
+  cached=$(state_get "ACT_$name" "")
+  id=${cached%%|*}; chunk=${cached#*|}
+  if [[ -n $id && $cached == *"|"* ]] && grep -qF "$chunk" "$html"; then
+    echo "$id"; return 0
   fi
-  if ! out=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H "$(cookie_header)" -H 'Accept: text/x-component' \
-      -H 'Content-Type: text/plain;charset=UTF-8' -H "Next-Action: $id" \
-      -H "Origin: $SITE" -H "Referer: $SITE/$LOCALE/open/$SLUG" \
-      -H 'sec-fetch-dest: empty' -H 'sec-fetch-mode: cors' -H 'sec-fetch-site: same-origin' --compressed \
-      -d '[]' -w $'\n%{http_code}' "$SITE/$LOCALE/open/$SLUG" 2>/dev/null); then
+  for url in $(grep -oE '/_next/static/[^"\\ ?]+\.js(\?dpl=[A-Za-z0-9_.-]+)?' "$html" | sort -u); do
+    found=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H 'Accept: */*' -H "Referer: $SITE/" \
+      -H 'sec-fetch-dest: script' -H 'sec-fetch-mode: no-cors' -H 'sec-fetch-site: same-origin' --compressed \
+      "$SITE$url" 2>/dev/null |
+      grep -oE '"[0-9a-f]{42}",[A-Za-z_$]+\.callServer,void 0,[A-Za-z_$]+\.findSourceMapURL,"'"$name"'"' | head -1)
+    if [[ -n $found ]]; then
+      state_set "ACT_$name" "${found:1:42}|${url%%\?*}"
+      echo "${found:1:42}"; return 0
+    fi
+  done
+  return 1
+}
+
+# calls action $1 from page path $2 with JSON arguments $3; $4 = that page's saved html
+ACT_STATUS=000
+ACT_BODY=""
+call_action() {
+  local id out
+  ACT_STATUS=000; ACT_BODY=""
+  id=$(find_action "$1" "$4") || { ACT_STATUS=404; return 1; }
+  out=$("$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H "$(cookie_header)" -H 'Accept: text/x-component' \
+    -H 'Content-Type: text/plain;charset=UTF-8' -H "Next-Action: $id" \
+    -H "Origin: $SITE" -H "Referer: $SITE$2" \
+    -H 'sec-fetch-dest: empty' -H 'sec-fetch-mode: cors' -H 'sec-fetch-site: same-origin' --compressed \
+    -d "$3" -w $'\n%{http_code}' "$SITE$2" 2>/dev/null) || return 1
+  ACT_STATUS=${out##*$'\n'}
+  if [[ $ACT_STATUS != 200 ]]; then
+    state_set "ACT_$1" ""
+    return 1
+  fi
+  ACT_BODY=$(grep -m1 '^1:' <<<"$out" | cut -c3-)
+  [[ -n $ACT_BODY ]]
+}
+
+# The site's pages claim the daily login reward by themselves when they load.
+daily_login() {
+  local html=$1 bonus
+  (( DAILY_LOGIN )) || return 0
+  if ! call_action claimDailyLogin "/$LOCALE/open/$SLUG" '[]' "$html"; then
+    case $ACT_STATUS in
+      000) ;;
+      404) warn "daily login: not found in the site's code, skipped" ;;
+      *) warn "daily login: the site answered HTTP $ACT_STATUS, skipped" ;;
+    esac
     return 0
   fi
-  if [[ ${out##*$'\n'} != 200 ]]; then
-    state_set CLAIM_ID ""
-    warn "daily login: the site answered HTTP ${out##*$'\n'}, skipped"; return 0
-  fi
-  line=$(grep -m1 '^1:{' <<<"$out" | cut -c3-)
-  jq -e '.day' >/dev/null 2>&1 <<<"$line" || return 0
-  state_set LOGIN_DAY "$(jq -r '"\(.day)/\(.cycle // 7)"' <<<"$line")"
-  if [[ $(jq -r '.claimed' <<<"$line") == true ]]; then
+  jq -e '.day' >/dev/null 2>&1 <<<"$ACT_BODY" || return 0
+  state_set LOGIN_DAY "$(jq -r '"\(.day)/\(.cycle // 7)"' <<<"$ACT_BODY")"
+  if [[ $(jq -r '.claimed' <<<"$ACT_BODY") == true ]]; then
     ok "daily login claimed: day $(state_get LOGIN_DAY "?")"
   fi
-  if [[ $(jq -r '.claimed or (.state.login_claimed_today // false)' <<<"$line") == true ]]; then
+  if [[ $(jq -r '.claimed or (.state.login_claimed_today // false)' <<<"$ACT_BODY") == true ]]; then
     state_set LOGIN_DATE "$(date -d "@$(now)" +%F)"
   fi
-  bonus=$(jq -r '.state.bonus_boosters // empty' <<<"$line")
+  bonus=$(jq -r '.state.bonus_boosters // empty' <<<"$ACT_BODY")
   [[ $bonus =~ ^[0-9]+$ ]] && state_set BONUS "$bonus"
   return 0
 }
@@ -616,6 +642,7 @@ play_session() {
     log "${B}pack $opened${R}$(jq -r '(if (.result.paid.bonus // 0) > 0 then " (bonus)" else "" end) + (if any(.result.boosters[]; .golden) then " (golden)" else "" end)' <<<"$body")"
     print_cards "$body"
     printf '%s\t%s\n' "$(now)" "$(jq -r '[.result.boosters[].cards[].rarity] | join(",")' <<<"$body")" >>"$HISTORY"
+    jq -r '.result.boosters[].cards[] | [.card_id, .rarity, .name] | @tsv' <<<"$body" 2>/dev/null | learn_rarities
     payload=$(loot_payload "$body")
     [[ -n $payload ]] && discord_send "$payload"
 
@@ -647,12 +674,168 @@ play_session() {
   return $ret
 }
 
-locked_session() {
+locked() {
   exec 9>"$LOCK"
   flock -w 600 9 || die "another session is already running"
-  play_session "$1"; local rc=$?
+  "$@"; local rc=$?
   flock -u 9
   return $rc
+}
+
+locked_session() { locked play_session "$1"; }
+
+# ---------- mini-game: which is rarer? ----------
+
+paris_day() { TZ=Europe/Paris date -d "@$(now)" +%F; }
+
+# AniList character id, read from a card's image address
+card_id_of() {
+  local base=${1##*/}
+  [[ $base =~ ^[a-z]?([0-9]+) ]] && echo "${BASH_REMATCH[1]}"
+}
+
+# prints the AniList favourites of characters $1 and $2 ("" when unknown). Rarity follows popularity.
+anilist_favs() {
+  local out
+  out=$("$CURL_BIN" -sS -m 20 -X POST https://graphql.anilist.co \
+    -H 'Content-Type: application/json' -H 'Accept: application/json' \
+    -d "$(jq -nc --argjson a "$1" --argjson b "$2" \
+      '{query: "query($ids:[Int]){Page(perPage:5){characters(id_in:$ids){id favourites}}}", variables: {ids: [$a, $b]}}')" \
+    2>/dev/null) || return 1
+  jq -r --argjson a "$1" --argjson b "$2" '
+    (.data.Page.characters // []) as $c
+    | "\(first($c[] | select(.id == $a) | .favourites) // "") \(first($c[] | select(.id == $b) | .favourites) // "")"' <<<"$out" 2>/dev/null
+}
+
+# The true rarity of every card seen (opened packs, answers revealed by the game) is kept
+# locally: popularity alone misses the few classics that the site always makes Mythic.
+rarity_rank() {
+  case $1 in
+    common) echo 1 ;; uncommon) echo 2 ;; rare) echo 3 ;; epic) echo 4 ;; legendary) echo 5 ;; mythic) echo 6 ;;
+    *) echo 0 ;;
+  esac
+}
+
+known_rarity() {
+  [[ -f $RARITIES ]] || return 0
+  awk -F'\t' -v id="$1" '$1 == id { r = $2 } END { print r }' "$RARITIES"
+}
+
+# reads "id<TAB>rarity<TAB>name" lines on stdin
+learn_rarities() {
+  local id rar name
+  while IFS=$'\t' read -r id rar name; do
+    [[ $id =~ ^[0-9]+$ ]] && (( $(rarity_rank "$rar") > 0 )) || continue
+    [[ $(known_rarity "$id") == "$rar" ]] || printf '%s\t%s\t%s\n' "$id" "$rar" "$name" >>"$RARITIES"
+  done
+}
+
+# plays today's rewarded game ($1 = free: a replay with no reward). 0 = done or skipped, 2 = dead session, 3 = safety stop
+play_rarer() {
+  local path="/$LOCALE/games/rarer" html esc played play pid rc round ida idb fa fb ra rb pick how last free=${1:-}
+  if [[ -f $HALT ]]; then
+    err "stopped earlier: $(<"$HALT") (run: ${B}oshibot resume${R})"; return 3
+  fi
+  load_browser
+  ensure_session; rc=$?
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) && { warn "network unavailable, game postponed"; return 0; }
+
+  visit_page "$path"
+  html=$PAGE_HTML
+  case $PAGE_CODE in
+    200) ;;
+    403 | 429) rm -f "$html"; halt "the game page answered HTTP $PAGE_CODE, the site may be blocking this tool"; return 3 ;;
+    *) rm -f "$html"; warn "game page unreachable ($PAGE_CODE), game postponed"; return 0 ;;
+  esac
+  LAST_PING=0
+  presence_ping
+
+  # the page carries the state of today's game: finished, in progress, or not started
+  esc=$(grep -oP '\\"game\\":\\"rarer\\",\\"gems\\":\d+,\\"play\\":\K.*?(?=,\\"played\\":(true|false))' "$html" | head -1)
+  played=$(grep -oP '\\"game\\":\\"rarer\\",\\"gems\\":\d+,\\"play\\":.*?,\\"played\\":\K(true|false)' "$html" | head -1)
+  play=""
+  [[ -n $esc && $esc != null ]] && play=$(printf '"%s"' "$esc" | jq -r . 2>/dev/null | jq -c . 2>/dev/null)
+  if [[ -z $free && $played == true && ( -z $play || $(jq -r '.finished' <<<"$play") == true ) ]]; then
+    state_set RARER_DAY "$(paris_day)"
+    log "which is rarer: already played today"
+    rm -f "$html"; return 0
+  fi
+  if [[ -z $play || $(jq -r '.finished' <<<"$play") == true ]]; then
+    idle "$(rand 2 5)"
+    if ! call_action gameStartAction "$path" '["rarer"]' "$html"; then
+      warn "which is rarer: could not start a game (HTTP $ACT_STATUS)"; rm -f "$html"; return 0
+    fi
+    play=$(jq -c '.play // empty' <<<"$ACT_BODY" 2>/dev/null)
+    if [[ -z $play ]]; then
+      warn "which is rarer: $(jq -r '.error // "no game returned"' <<<"$ACT_BODY" 2>/dev/null)"; rm -f "$html"; return 0
+    fi
+  fi
+  if [[ -z $free && $(jq -r '.rewarded' <<<"$play") != true ]]; then
+    state_set RARER_DAY "$(paris_day)"
+    log "which is rarer: today's rewarded game is already used"
+    rm -f "$html"; return 0
+  fi
+
+  pid=$(jq -r '.id' <<<"$play")
+  for ((round = 1; round <= 30; round++)); do
+    [[ $(jq -r '.finished' <<<"$play") == true ]] && break
+    ida=$(card_id_of "$(jq -r '.cards[0].image_url // ""' <<<"$play")")
+    idb=$(card_id_of "$(jq -r '.cards[1].image_url // ""' <<<"$play")")
+    ra=$(rarity_rank "$(known_rarity "${ida:-0}")")
+    rb=$(rarity_rank "$(known_rarity "${idb:-0}")")
+    fa=""; fb=""
+    if (( ra > 0 && rb > 0 && ra != rb )); then
+      how="known rarities"
+      pick=0; (( rb > ra )) && pick=1
+    elif (( ra == 6 || rb == 6 )); then
+      how="known mythic"
+      pick=0; (( rb == 6 )) && pick=1
+    else
+      [[ -n $ida && -n $idb ]] && read -r fa fb < <(anilist_favs "$ida" "$idb")
+      if [[ ! $fa =~ ^[0-9]+$ || ! $fb =~ ^[0-9]+$ ]]; then
+        warn "which is rarer: popularity unknown for this pair, game left for later"
+        rm -f "$html"; return 0
+      fi
+      how="$fa vs $fb favourites"
+      pick=0; (( fb > fa )) && pick=1
+    fi
+    idle "$(rand 1 5)"
+    if ! call_action gameAnswerAction "$path" "$(jq -nc --argjson id "$pid" --arg p "$pick" '[$id, $p]')" "$html"; then
+      warn "which is rarer: answer refused (HTTP $ACT_STATUS), game left for later"; rm -f "$html"; return 0
+    fi
+    last=$(jq -c '.play // empty' <<<"$ACT_BODY" 2>/dev/null)
+    if [[ -z $last ]]; then
+      warn "which is rarer: $(jq -r '.error // "no answer returned"' <<<"$ACT_BODY" 2>/dev/null)"; rm -f "$html"; return 0
+    fi
+    log "which is rarer, round $round: $(jq -r '.cards | map(.name) | join(" vs ")' <<<"$play"), picked $(jq -r --argjson i "$pick" '.cards[$i].name' <<<"$play") ($how) $([[ $(jq -r '.last.correct' <<<"$last") == true ]] && echo "${GRN}correct${R}" || echo "${RED}wrong${R}")"
+    play=$last
+    jq -r '.last.cards // [] | .[] | select(.rarity != null)
+      | [(.card_id // (.image_url // "" | split("/") | last | capture("^[a-z]?(?<n>[0-9]+)").n)), .rarity, .name] | @tsv' <<<"$play" 2>/dev/null | learn_rarities
+  done
+  rm -f "$html"
+  if [[ $(jq -r '.finished' <<<"$play") == true ]]; then
+    if [[ -z $free ]]; then
+      state_set RARER_DAY "$(paris_day)"
+      state_set RARER_RESULT "$(jq -r '"\(.score // 0)/\(.rounds // 10), +\(.gems // 0) gems"' <<<"$play")"
+      discord_text "\"Which is rarer?\" played today: $(jq -r '"score \(.score // 0)/\(.rounds // 10), +\(.gems // 0) gems"' <<<"$play")."
+    fi
+    ok "which is rarer: $(jq -r '"\(.score // 0)/\(.rounds // 10), +\(.gems // 0) gems"' <<<"$play")"
+  fi
+  return 0
+}
+
+# true when today's game is still to play and its random time of day has come
+rarer_due() {
+  (( PLAY_RARER )) || return 1
+  local today
+  today=$(paris_day)
+  [[ $(state_get RARER_DAY "") == "$today" ]] && return 1
+  if [[ $(state_get GAME_DAY "") != "$today" ]]; then
+    state_set GAME_DAY "$today"
+    state_set GAME_AT $(( $(TZ=Europe/Paris date -d "$today 00:00" +%s) + $(rand 32400 72000) ))
+  fi
+  (( $(now) >= $(state_get GAME_AT 0) ))
 }
 
 # ---------- schedule ----------
@@ -729,7 +912,7 @@ send_recap() {
 }
 
 cmd_run() {
-  local gap target first=1 last want pu fill
+  local gap target first=1 last want pu fill rc
   ensure_profile
   ensure_device
   load_browser
@@ -776,8 +959,12 @@ cmd_run() {
 
     want=$(max_packs)
     (( want > 4 && $(rand 1 100) <= PARTIAL_CHANCE )) && want=$(rand 3 $(( want * 3 / 4 )))
-    locked_session "$want"
-    case $? in
+    locked_session "$want"; rc=$?
+    if (( rc == 0 )) && rarer_due; then
+      sleep "$(rand 8 45)"
+      locked play_rarer; rc=$?
+    fi
+    case $rc in
       2)
         discord_text "oshibot lost its oshicards session: $(session_dead_reason)"
         exit 2 ;;
@@ -984,6 +1171,7 @@ cmd_status() {
   echo "Profile : $([[ -n $PRESET ]] && echo "${GRN}$PRESET${R}, sessions every $GAP_MIN to $GAP_MAX min (details: oshibot profile)" || echo "${YEL}not drawn yet${R} (run: oshibot profile <chill|regular|grinder|nonstop>)")"
   echo "Stock   : $([[ -n $(state_get FREE_MAX "") ]] && echo "up to $(max_packs) free boosters, one every $(regen_minutes) min, $(state_get BONUS 0) bonus left (read from your account)" || echo "not known yet, read from the site at the first opening")"
   echo "Login   : $([[ -n $(state_get LOGIN_DAY "") ]] && echo "streak day $(state_get LOGIN_DAY ""), $([[ $(state_get LOGIN_DATE "") == "$(date +%F)" ]] && echo "${GRN}claimed today${R}" || echo "not claimed yet today")" || echo "not known yet")"
+  (( PLAY_RARER )) && echo "Game    : which is rarer, $([[ $(state_get RARER_DAY "") == "$(paris_day)" ]] && echo "${GRN}played today${R}${DIM}$(r=$(state_get RARER_RESULT ""); echo "${r:+ ($r)}")${R}" || echo "not played yet today")"
   echo "Webhook : $([[ -n $WEBHOOK ]] && echo "${GRN}configured${R}" || echo "${YEL}not configured${R} (run: oshibot webhook <url>)")"
   if [[ -f $UNIT ]]; then
     echo "Service : $(systemctl is-active "$SERVICE" 2>/dev/null)"
@@ -1085,6 +1273,7 @@ cmd_help() {
     ${c}oshibot status${R}                account, profile, next session, today's pulls
     ${c}oshibot stats${R}                 packs and rarities over the last 7 days
     ${c}oshibot open${R} [n]              play one session now (whole free stock, or n packs)
+    ${c}oshibot rarer${R}                 play today's "Which is rarer?" mini-game now
     ${c}oshibot pause${R} <duration>      take a break: 3d, 12h, 45m
     ${c}oshibot resume${R}                end a break, or restart after a safety stop
     ${c}oshibot logs${R}                  follow what the service is doing
@@ -1114,6 +1303,7 @@ main() {
     profile) cmd_profile "$@" ;;
     webhook) cmd_webhook "$@" ;;
     open) cmd_open "$@" ;;
+    rarer) ensure_profile; locked play_rarer "$@" ;;
     pause) cmd_pause "$@" ;;
     resume) cmd_resume ;;
     stats) cmd_stats ;;

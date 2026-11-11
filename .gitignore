@@ -9,3 +9,4 @@ halted
 .lock
 *.tmp
 *.har
+rarity.tsv
