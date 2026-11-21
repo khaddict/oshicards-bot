@@ -39,6 +39,7 @@
 
 ## ✨ Features
 
+- 📦 **Any free pack.** Standard by default. Event and themed packs can be listed in order of preference, and the bot falls back to the next one when an event ends.
 - 🎁 **Free boosters only.** Every request is sent with `maxGems: 0`, and the tool stops itself if a gem is ever spent.
 - 🗓️ **A schedule of your own.** Each install draws its own random profile: bedtime, sleep length, session rhythm, weekday quiet hours, weekend shift. No two installs play alike.
 - 🎮 **Four play styles.** `chill`, `regular`, `grinder` or `nonstop`, depending on how many packs you want and how much you want to stand out.
@@ -139,7 +140,8 @@ The profile is a plain `profile` file next to the script. You can edit it freely
 | `oshibot browser [file]` | Save your browser's identity without changing the session |
 | `oshibot profile [preset]` | Show your profile, or draw a new one |
 | `oshibot webhook <url>` | Set the Discord webhook (`test` to try it, `off` to remove it) |
-| `oshibot open [n]` | Play one session now: empty the free stock, or `n` packs at most |
+| `oshibot open [n] [pack]` | Play one session now: empty the free stock, or `n` packs at most |
+| `oshibot packs` | List the site's packs, their cost and availability, and which ones you open |
 | `oshibot games [name...]` | Play today's mini-games now: `anime`, `rarer`, `memory` |
 | `oshibot missions` | Claim the missions that are finished |
 | `oshibot pause <duration>` | Stop playing for a while: `3d`, `12h`, `45m` |
@@ -149,6 +151,29 @@ The profile is a plain `profile` file next to the script. You can edit it freely
 | `oshibot install` / `uninstall` | Add or remove the systemd service |
 | `oshibot logs` | Follow the service logs |
 | `oshibot run` | Run the loop in the foreground, without systemd |
+
+## 📦 Choosing the packs
+
+All free packs draw from the same free stock. By default `oshibot` opens Standard packs. To open others, list them in the `profile` file, in order of preference:
+
+```bash
+PACKS="rivals-2026 standard"
+```
+
+At each session, `oshibot` reads the pack list from the site and opens the first one that is free and available right now. Here, Rivals packs while the event lasts, then Standard packs once it ends, with nothing to change. A pack that costs gems is skipped with a warning, even if you list it.
+
+`oshibot packs` shows every pack the site offers, with its cost and availability window:
+
+```
+Pack                   Name                       Cost   Available
+standard               Standard                   free   always <- in your PACKS
+shonen                 Shōnen                     free   always
+weekly                 Weekly banner              gems   always
+rivals-2026            Rivals                     free   until Sat 28 Nov 19:00 <- in your PACKS
+collector-prestige     Prestige Edition           gems   always
+```
+
+`oshibot open 3 shonen` opens three packs of a given type right away, whatever `PACKS` says.
 
 ## 🎯 Mini-games and missions
 
@@ -216,7 +241,7 @@ Everything lives next to the script and is ignored by git:
 - **Volume is a signal on its own.** Even a perfect schedule stands out if it opens 100 packs every single day. Pick the lowest preset you are happy with.
 - **This repository is public.** The site's admins can read it too.
 - **Sessions can be revoked.** If the site ends the session, the service stops and tells you on Discord. Run `oshibot cookie` again. See "The session keeps dying" below if it keeps happening.
-- **Standard booster only.** The pack type is the `SLUG` setting. The weekly banner's free daily booster is not opened.
+- **Free packs only.** Packs that cost gems (Prestige, Ultimate) are never opened, and neither is the weekly banner's daily booster.
 - **It can break at any time.** The tool relies on private endpoints observed in the browser. A site update may change them.
 
 ## 🩹 The session keeps dying
