@@ -42,6 +42,9 @@ USE_BONUS=1
 DAILY_LOGIN=1
 PLAY_GAMES=""
 CLAIM_MISSIONS=0
+DO_MISSIONS=""
+MISSION_FRIEND=""
+AUCTION_MAX_GEMS=50
 GAP_MIN=90; GAP_MAX=180
 SKIP_CHANCE=10; SKIP_EXTRA_MIN=45; SKIP_EXTRA_MAX=90
 LIGHT_DAY_CHANCE=10; PARTIAL_CHANCE=10
@@ -189,6 +192,13 @@ DAILY_LOGIN=$DAILY_LOGIN
 PLAY_GAMES="$PLAY_GAMES"
 # claim finished missions
 CLAIM_MISSIONS=$CLAIM_MISSIONS
+# missions to do, among: banner wishlist chat auction sell exchange recycle (empty = none).
+# sell, exchange and recycle only use common and uncommon duplicates numbered above 100.
+DO_MISSIONS="$DO_MISSIONS"
+# the friend who gets a short message for the "send a message to a friend" mission (see: oshibot friend)
+MISSION_FRIEND="$MISSION_FRIEND"
+# the most gems a bid may engage for the "bid on an auction" mission
+AUCTION_MAX_GEMS=$AUCTION_MAX_GEMS
 CURL_BIN=$CURL_BIN
 EOF
 }
@@ -1272,6 +1282,205 @@ play_quiz() {
   return 0
 }
 
+# ---------- doing missions ----------
+
+sb_get() {
+  "$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H "apikey: $APIKEY" -H "Authorization: Bearer $(jq -r .access_token "$SESSION")" \
+    -H 'Accept: application/json' -H "Origin: $SITE" -H "Referer: $SITE/" "$SUPABASE/rest/v1/$1" 2>/dev/null
+}
+
+sb_rpc() {
+  http_post "$SUPABASE/rest/v1/rpc/$1" "$2" "${BROWSER[@]}" -H "apikey: $APIKEY" \
+    -H "Authorization: Bearer $(jq -r .access_token "$SESSION")" -H 'content-profile: public' \
+    -H "Origin: $SITE" -H "Referer: $SITE/"
+  [[ $HTTP_STATUS == 2* ]]
+}
+
+# Duplicates that may go: common and uncommon only, numbered above 100. The site never offers a
+# card's best copy, a locked copy or one on sale. Prints "copy<TAB>card<TAB>number<TAB>rarity<TAB>name".
+SPARE_HTML=""
+spare_copies() {
+  visit_page "/$LOCALE/exchange"
+  SPARE_HTML=$PAGE_HTML
+  [[ $PAGE_CODE == 200 ]] || return 1
+  page_stream "$SPARE_HTML" | grep -oP '"candidates":\K\{.*?\}(?=,"cardBack")' | head -1 |
+    jq -r '("common", "uncommon") as $r | (.[$r] // [])[] | . as $c | .copies[] | select(.print_no > 100)
+      | [.id, $c.card_id, .print_no, $r, $c.name] | @tsv' 2>/dev/null | shuf
+}
+
+# the rarity of each spare copy, read from the same page
+spare_rarity() {
+  page_stream "$SPARE_HTML" | grep -oP '"candidates":\K\{.*?\}(?=,"cardBack")' | head -1 |
+    jq -r --arg r "$1" '(.[$r] // [])[] | .copies[] | select(.print_no > 100) | .id' 2>/dev/null
+}
+
+mission_banner() {
+  local body key
+  idle "$(rand 3 8)"
+  http_post "$SITE/api/open" \
+    "$(jq -nc --arg id "$(cat /proc/sys/kernel/random/uuid)" '{slug:"weekly", quantity:1, maxGems:0, requestId:$id}')" \
+    "${BROWSER[@]}" -H "$(cookie_header)" -H 'Accept: */*' \
+    -H "Origin: $SITE" -H "Referer: $SITE/$LOCALE/open/weekly" \
+    -H 'sec-fetch-dest: empty' -H 'sec-fetch-mode: cors' -H 'sec-fetch-site: same-origin'
+  [[ $HTTP_STATUS == 403 || $HTTP_STATUS == 429 ]] && { halt "opening the banner pack answered HTTP $HTTP_STATUS"; return 3; }
+  key=$(jq -r '.errorKey // empty' <<<"$HTTP_BODY" 2>/dev/null)
+  if [[ $HTTP_STATUS != 200 || -n $key ]] || ! jq -e .result.boosters >/dev/null 2>&1 <<<"$HTTP_BODY"; then
+    warn "mission banner: the free banner pack was refused (${key:-HTTP $HTTP_STATUS})"; return 1
+  fi
+  body=$HTTP_BODY
+  if (( $(jq -r '.result.paid.gems // 0' <<<"$body") > 0 )); then
+    halt "the banner pack was paid with gems"; return 3
+  fi
+  log "${B}banner pack${R}"
+  print_cards "$body"
+  printf '%s\t%s\t%s\n' "$(now)" "$(jq -r '[.result.boosters[].cards[].rarity] | join(",")' <<<"$body")" weekly >>"$HISTORY"
+  jq -r '.result.boosters[].cards[] | [.card_id, .rarity, .name, (.series_title // "")] | @tsv' <<<"$body" 2>/dev/null | learn_cards
+  local payload
+  payload=$(loot_payload "$body")
+  [[ -n $payload ]] && discord_send "$payload"
+  MISSION_DONE+="${MISSION_DONE:+, }banner pack opened"
+}
+
+mission_wishlist() {
+  local id try
+  visit_page "/$LOCALE/collection?filter=missing"
+  for id in $(grep -oP 'href="/[a-z]{2}/card/\K\d+' "$PAGE_HTML" | awk '!s[$0]++' | shuf -n 3); do
+    idle "$(rand 2 6)"
+    call_action toggleWishlistAction "/$LOCALE/collection?filter=missing" "[$id]" "$PAGE_HTML" || continue
+    if [[ $(jq -r '.wished' <<<"$ACT_BODY" 2>/dev/null) == true ]]; then
+      rm -f "$PAGE_HTML"; MISSION_DONE+="${MISSION_DONE:+, }card $id wished"; return 0
+    fi
+    # it was already wished: put it back
+    call_action toggleWishlistAction "/$LOCALE/collection?filter=missing" "[$id]" "$PAGE_HTML"
+  done
+  rm -f "$PAGE_HTML"
+  warn "mission wishlist: no card could be added"; return 1
+}
+
+mission_chat() {
+  local msg
+  if [[ -z $MISSION_FRIEND ]]; then
+    warn "mission chat: no friend set (run: oshibot friend <username>)"; return 1
+  fi
+  msg=$(shuf -n1 -e "salut !" "yo" "hello" "ça va ?" "bonne journée" "wesh" "coucou" "gg pour tes tirages")
+  visit_page "/$LOCALE/friends/$MISSION_FRIEND"
+  [[ $PAGE_CODE == 200 ]] || { rm -f "$PAGE_HTML"; warn "mission chat: conversation with $MISSION_FRIEND unreachable ($PAGE_CODE)"; return 1; }
+  idle "$(rand 5 15)"
+  if ! call_action sendChatMessageAction "/$LOCALE/friends/$MISSION_FRIEND" \
+      "$(jq -nc --arg u "$MISSION_FRIEND" --arg m "$msg" '[$u, $m, null, null, null, null]')" "$PAGE_HTML" ||
+      [[ -n $(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null) ]]; then
+    rm -f "$PAGE_HTML"; warn "mission chat: message refused ($(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null))"; return 1
+  fi
+  rm -f "$PAGE_HTML"
+  MISSION_DONE+="${MISSION_DONE:+, }message \"$msg\" sent to $MISSION_FRIEND"
+}
+
+mission_auction() {
+  local feed row id price name
+  feed=$(sb_get "auction_feed?select=id,price,current_bid,bids_count,name,rarity,is_mine,i_lead&is_mine=eq.false&order=price.asc&limit=10")
+  row=$(jq -c --argjson max "$AUCTION_MAX_GEMS" '[.[] | select(.i_lead != true and .price <= $max)] | first // empty' <<<"$feed" 2>/dev/null)
+  [[ -n $row ]] || { warn "mission auction: no auction under $AUCTION_MAX_GEMS gems"; return 1; }
+  id=$(jq -r .id <<<"$row"); name=$(jq -r .name <<<"$row")
+  sb_rpc auction_detail "$(jq -nc --argjson i "$id" '{p_auction_id:$i}')" || { warn "mission auction: auction $id unreadable"; return 1; }
+  price=$(jq -r '.min_bid // empty' <<<"$HTTP_BODY" 2>/dev/null)
+  [[ $price =~ ^[0-9]+$ ]] || price=$(jq -r .price <<<"$row")
+  (( price <= AUCTION_MAX_GEMS )) || { warn "mission auction: minimum bid $price is above $AUCTION_MAX_GEMS gems"; return 1; }
+  visit_page "/$LOCALE/market?tab=auctions"
+  idle "$(rand 4 10)"
+  if ! call_action placeBidAction "/$LOCALE/market?tab=auctions" "[$id, $price]" "$PAGE_HTML" ||
+      [[ -n $(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null) ]]; then
+    rm -f "$PAGE_HTML"; warn "mission auction: bid refused ($(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null))"; return 1
+  fi
+  rm -f "$PAGE_HTML"
+  MISSION_DONE+="${MISSION_DONE:+, }bid $price gems on $name"
+}
+
+mission_sell() {
+  local copy card num _r name price list
+  list=$(mktemp)
+  spare_copies >"$list"
+  IFS=$'\t' read -r copy card num _r name <"$list"
+  rm -f "$list"
+  [[ -n $copy ]] || { rm -f "$SPARE_HTML"; warn "mission sell: no spare common or uncommon copy"; return 1; }
+  sb_rpc market_price_stats "$(jq -nc --argjson c "$card" --argjson n "$num" --argjson i "$copy" '{p_card_id:$c, p_print_no:$n, p_copy_id:$i}')"
+  price=$(jq -r '.suggested // empty' <<<"$HTTP_BODY" 2>/dev/null)
+  [[ $price =~ ^[0-9]+$ ]] && (( price > 0 )) || price=$(jq -r '.min_allowed // 2' <<<"$HTTP_BODY" 2>/dev/null)
+  rm -f "$SPARE_HTML"
+  visit_page "/$LOCALE/market?tab=sell"
+  idle "$(rand 4 10)"
+  if ! call_action createListingAction "/$LOCALE/market?tab=sell" "$(jq -nc --argjson i "$copy" --argjson p "$price" '[$i, $p, 48, false]')" "$PAGE_HTML" ||
+      [[ -n $(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null) ]]; then
+    rm -f "$PAGE_HTML"; warn "mission sell: listing refused (HTTP $ACT_STATUS $(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null))"; return 1
+  fi
+  rm -f "$PAGE_HTML"
+  MISSION_DONE+="${MISSION_DONE:+, }$name #$num listed for $price gems"
+}
+
+mission_exchange() {
+  local ids
+  spare_copies >/dev/null
+  ids=$(spare_rarity common | shuf | head -5 | jq -Rn '[inputs | tonumber]')
+  if (( $(jq length <<<"$ids") < 5 )); then
+    rm -f "$SPARE_HTML"; warn "mission exchange: fewer than 5 spare commons"; return 1
+  fi
+  idle "$(rand 4 10)"
+  if ! call_action exchangeDuplicatesAction "/$LOCALE/exchange" "[$ids]" "$SPARE_HTML" ||
+      [[ -n $(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null) ]]; then
+    rm -f "$SPARE_HTML"; warn "mission exchange: refused ($(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null))"; return 1
+  fi
+  rm -f "$SPARE_HTML"
+  MISSION_DONE+="${MISSION_DONE:+, }5 commons exchanged for $(jq -r '.card.name // "a card"' <<<"$ACT_BODY")"
+}
+
+# $1 = how many copies are still needed
+mission_recycle() {
+  local want=$1 copy n=0 gems=0 g list
+  list=$(mktemp)
+  spare_copies >"$list"
+  rm -f "$SPARE_HTML"
+  visit_page "/$LOCALE/collection"
+  SPARE_HTML=$PAGE_HTML
+  for copy in $(cut -f1 "$list" | head -"$want"); do
+    idle "$(rand 2 6)"
+    call_action recycleCopyAction "/$LOCALE/collection" "[$copy]" "$SPARE_HTML" || continue
+    [[ -z $(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null) ]] || continue
+    g=$(jq -r '.gems // 0' <<<"$ACT_BODY"); [[ $g =~ ^[0-9]+$ ]] || g=0
+    n=$((n + 1)); gems=$((gems + g))
+  done
+  rm -f "$SPARE_HTML" "$list"
+  (( n > 0 )) || { warn "mission recycle: nothing recycled"; return 1; }
+  MISSION_DONE+="${MISSION_DONE:+, }$n duplicates recycled (+$gems gems)"
+}
+
+# does the unfinished missions listed in DO_MISSIONS, from the missions page saved in $1
+MISSION_DONE=""
+do_missions() {
+  local html=$1 line kind left rc
+  [[ -n $DO_MISSIONS ]] || return 0
+  MISSION_DONE=""
+  while IFS=$'\t' read -r kind left; do
+    case $kind in
+      banner) [[ " $DO_MISSIONS " == *" banner "* ]] || continue; mission_banner ;;
+      wishlist) [[ " $DO_MISSIONS " == *" wishlist "* ]] || continue; mission_wishlist ;;
+      chat | message*) [[ " $DO_MISSIONS " == *" chat "* ]] || continue; mission_chat ;;
+      *bid* | auction*) [[ " $DO_MISSIONS " == *" auction "* ]] || continue; mission_auction ;;
+      market_sell | *sell*) [[ " $DO_MISSIONS " == *" sell "* ]] || continue; mission_sell ;;
+      exchange*) [[ " $DO_MISSIONS " == *" exchange "* ]] || continue; mission_exchange ;;
+      recycle*) [[ " $DO_MISSIONS " == *" recycle "* ]] || continue; mission_recycle "$left" ;;
+      *) continue ;;
+    esac
+    rc=$?
+    (( rc == 3 )) && return 3
+    sleep "$(rand 5 20)"
+  done < <(page_stream "$html" | grep -oP '\{"code":"[a-z0-9_]+","done":false,[^{}]*?"claimed":false,"progress":\d+' |
+    sed 's/$/}/' | jq -r '[.kind, (.target - .progress)] | @tsv' 2>/dev/null | awk '!s[$1]++')
+  if [[ -n $MISSION_DONE ]]; then
+    ok "missions done: $MISSION_DONE"
+    discord_text "Missions done: $MISSION_DONE."
+  fi
+  return 0
+}
+
 # ---------- missions ----------
 
 # claims every mission that is finished and not claimed yet. 0 = ok, 2 = dead session, 3 = safety stop
@@ -1292,6 +1501,14 @@ claim_missions() {
     403 | 429) rm -f "$html"; halt "the missions page answered HTTP $PAGE_CODE, the site may be blocking this tool"; return 3 ;;
     *) rm -f "$html"; warn "missions page unreachable ($PAGE_CODE)"; return 0 ;;
   esac
+  if [[ -n $DO_MISSIONS && $(state_get MISSIONS_DONE_AT 0) -lt $(( $(now) - 3600 )) ]]; then
+    state_set MISSIONS_DONE_AT "$(now)"
+    do_missions "$html" || { rm -f "$html"; return 3; }
+    if [[ -n $MISSION_DONE ]]; then
+      rm -f "$html"; sleep "$(rand 5 15)"
+      visit_page "$path"; html=$PAGE_HTML
+    fi
+  fi
   for code in $(grep -oP '\{\\"code\\":\\"\K[a-z0-9_]+(?=\\",\\"done\\":true,[^{}]*?\\"claimed\\":false)' "$html" | sort -u); do
     idle "$(rand 1 4)"
     if ! call_action claimMissionAction "$path" "$(jq -nc --arg c "$code" '[$c]')" "$html"; then
@@ -1682,6 +1899,34 @@ cmd_open() {
   locked_session "$n"
 }
 
+cmd_friend() {
+  local u=${1:-} html list
+  load_browser
+  ensure_session >/dev/null; (( $? == 2 )) && die "no valid session, run: oshibot cookie"
+  visit_page "/$LOCALE/friends"
+  html=$PAGE_HTML
+  [[ $PAGE_CODE == 200 ]] || { rm -f "$html"; die "friends page unreachable (HTTP $PAGE_CODE)"; }
+  list=$(page_stream "$html" | grep -oP '"friends":\K\[.*?\](?=,"(requests|conversations|incoming|outgoing|groups|sent|received)")' | head -1 |
+    jq -r '.[] | [.username, .display_name] | @tsv' 2>/dev/null)
+  rm -f "$html"
+  if [[ -z $u ]]; then
+    echo "Your friends (username, name):"
+    sed 's/^/  /' <<<"${list:-  (none found)}"
+    echo
+    echo "Current MISSION_FRIEND: ${MISSION_FRIEND:-none}. Set one with: oshibot friend <username>"
+    return 0
+  fi
+  awk -F'\t' -v u="$u" '$1 == u { f = 1 } END { exit !f }' <<<"$list" || die "$u is not in your friends list (run: oshibot friend)"
+  ensure_profile
+  if grep -q '^MISSION_FRIEND=' "$PROFILE"; then
+    sed -i "s/^MISSION_FRIEND=.*/MISSION_FRIEND=\"$u\"/" "$PROFILE"
+  else
+    printf 'MISSION_FRIEND="%s"\n' "$u" >>"$PROFILE"
+  fi
+  ok "the friend message mission will write to ${B}$u${R}"
+  restart_service
+}
+
 cmd_packs() {
   local html list slug kind from until name mark when
   load_browser
@@ -1865,7 +2110,8 @@ cmd_help() {
     ${c}oshibot open${R} [n] [pack]       play one session now (whole free stock, or n packs)
     ${c}oshibot packs${R}                 list the site's packs and which ones you open
     ${c}oshibot games${R} [name...]       play today's mini-games now: anime, rarer, memory, quiz
-    ${c}oshibot missions${R}              claim the missions that are finished
+    ${c}oshibot missions${R}              do and claim the missions
+    ${c}oshibot friend${R} [username]     list your friends, or pick the one for the message mission
     ${c}oshibot pause${R} <duration>      take a break: 3d, 12h, 45m
     ${c}oshibot resume${R}                end a break, or restart after a safety stop
     ${c}oshibot logs${R}                  follow what the service is doing
@@ -1896,6 +2142,7 @@ main() {
     webhook) cmd_webhook "$@" ;;
     open) cmd_open "$@" ;;
     packs) cmd_packs ;;
+    friend) cmd_friend "$@" ;;
     games) ensure_profile; locked play_games "$@" ;;
     missions) ensure_profile; locked claim_missions ;;
     pause) cmd_pause "$@" ;;

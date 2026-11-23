@@ -49,7 +49,7 @@
 - 🔄 **Self-renewing session.** Paste your cookie once. The access token is refreshed automatically from then on.
 - 📅 **Daily login streak.** Claims the daily login reward the way the site's pages do when they load, so the first session of the day collects it.
 - 🎯 **Daily mini-games (opt-in).** Plays "Mystery anime", "Rarer?", "Memory pairs" and the "Who is it?" quiz once a day, with random pauses between answers.
-- ✅ **Missions and rewards (opt-in).** Claims daily and weekly missions as soon as they are finished, and once a day the weekly boss reward, season pass tiers, achievements and completed anime.
+- ✅ **Missions and rewards (opt-in).** Does most daily and weekly missions, claims them as soon as they are finished, and once a day the weekly boss reward, season pass tiers, achievements and completed anime.
 - 🔔 **Discord notifications.** Legendary and mythic pulls with the card art, a daily recap, mini-game scores, claimed missions, and an alert if the tool stops.
 
 ## 📋 Requirements
@@ -143,7 +143,8 @@ The profile is a plain `profile` file next to the script. You can edit it freely
 | `oshibot open [n] [pack]` | Play one session now: empty the free stock, or `n` packs at most |
 | `oshibot packs` | List the site's packs, their cost and availability, and which ones you open |
 | `oshibot games [name...]` | Play today's mini-games now: `anime`, `rarer`, `memory`, `quiz` |
-| `oshibot missions` | Claim the missions that are finished |
+| `oshibot missions` | Do and claim the missions |
+| `oshibot friend [username]` | List your friends, or pick the one for the message mission |
 | `oshibot pause <duration>` | Stop playing for a while: `3d`, `12h`, `45m` |
 | `oshibot resume` | Cancel a pause, or restart after a safety stop |
 | `oshibot status` | Account, profile, next session, today's pulls |
@@ -203,6 +204,30 @@ About "Rarer?":
 2. **Popularity otherwise.** On the site, rarity follows how popular a character is on AniList. The card's image address contains the AniList character id, so `oshibot` asks the public [AniList API](https://anilist.co) for the favourites of both characters and picks the higher one. This is the only request the tool sends to a third party, and it only contains the two character ids.
 
 It is not perfect: a few classics are always Mythic on the site whatever their popularity. Those cards are learned the first time they come up, so the hit rate improves with time. In early testing, 27 rounds out of 28 were answered correctly over three games.
+
+### Doing the missions
+
+List the missions the tool may do in the `profile` file:
+
+```bash
+DO_MISSIONS="banner wishlist chat auction sell exchange recycle"
+MISSION_FRIEND="eikosensei"   # set with: oshibot friend <username>
+AUCTION_MAX_GEMS=50
+```
+
+| Mission | What the tool does |
+|---|---|
+| Open the weekly banner pack (`banner`) | Opens the banner's free pack of the day, never a paid one. |
+| Add a card to your wishlist (`wishlist`) | Wishes a card you do not own yet. |
+| Send a message to a friend (`chat`) | Sends a short greeting to `MISSION_FRIEND`, and only to them. |
+| Bid on an auction (`auction`) | Places the minimum bid on the cheapest auction, up to `AUCTION_MAX_GEMS`. You may win it and pay. |
+| Sell a card on the market (`sell`) | Lists one duplicate for 48 hours at the site's suggested price. |
+| Exchange duplicates (`exchange`) | Gives 5 common duplicates for 1 random uncommon. |
+| Recycle duplicates (`recycle`) | Recycles as many duplicates as the mission asks, for gems. |
+
+`sell`, `exchange` and `recycle` only touch common and uncommon duplicates numbered above 100. The site already keeps your best copy of each card, your locked copies and copies on sale out of reach. Missions the tool does not know are left to you.
+
+### Claiming
 
 Missions are claimed when they are finished, whoever finished them. `oshibot` checks the missions page after the games, then every two to four hours after a pack session. It does not do the missions that need a real choice from you, such as bidding at an auction.
 
