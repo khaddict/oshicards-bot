@@ -29,6 +29,8 @@ COOKIE_NAME="sb-$REF-auth-token"
 LOCALES="en fr es de"
 DEFAULT_MAX_PACKS=12   # only until the real per-account value is read from the site
 NOTIFY_RARITIES='["legendary","mythic"]'
+ROUTINE_FROM="00:01"
+ROUTINE_TO="01:00"
 SERVICE="oshibot"
 UNIT="/etc/systemd/system/$SERVICE.service"
 SNIPPET='copy(JSON.stringify({ua:navigator.userAgent,brands:navigator.userAgentData?.brands,platform:navigator.userAgentData?.platform,mobile:navigator.userAgentData?.mobile,lang:navigator.languages,cookie:document.cookie}))'
@@ -184,6 +186,11 @@ LONG_PAUSE_MAX=$LONG_PAUSE_MAX
 # See the list with: oshibot packs
 PACKS="${PACKS:-$SLUG}"
 DAILY_RECAP=$DAILY_RECAP
+# daily routine (mini-games, missions, rewards, then the Discord recap), at a random time in this window, Paris time
+ROUTINE_FROM="$ROUTINE_FROM"
+ROUTINE_TO="$ROUTINE_TO"
+# rarities posted to Discord as they are pulled
+NOTIFY_RARITIES='$NOTIFY_RARITIES'
 # also open bonus boosters (quest rewards), once the free stock is empty
 USE_BONUS=$USE_BONUS
 # claim the daily login reward, as the site does from every page it loads
@@ -561,8 +568,9 @@ discord_send() {
 }
 
 # routine news waits for the daily recap instead of posting right away
+# $1 = kind (mythic, missions, claimed, rewards), $2 = text, $3 = optional image
 digest_add() {
-  printf '%s\t%s\n' "$(date +%F)" "$1" >>"$DIGEST"
+  printf '%s\t%s\t%s\t%s\n' "$(date +%F)" "$1" "$2" "${3:-}" >>"$DIGEST"
 }
 
 discord_text() {
@@ -746,6 +754,9 @@ play_session() {
     print_cards "$body"
     printf '%s\t%s\t%s\n' "$(now)" "$(jq -r '[.result.boosters[].cards[].rarity] | join(",")' <<<"$body")" "$SLUG" >>"$HISTORY"
     jq -r '.result.boosters[].cards[] | [.card_id, .rarity, .name, (.series_title // "")] | @tsv' <<<"$body" 2>/dev/null | learn_cards
+    jq -r "$JQ_EDITION"'.result.boosters[].cards[] | select(.rarity == "mythic")
+      | ["\(.name)\(if edition then " [\(edition)]" else "" end) (\(.series_title // ""))", ((.variant | objects | .image) // .image_url)] | @tsv' <<<"$body" 2>/dev/null |
+      while IFS=$'\t' read -r t img; do digest_add mythic "$t" "$img"; done
     payload=$(loot_payload "$body")
     [[ -n $payload ]] && discord_send "$payload"
 
@@ -1099,7 +1110,7 @@ play_games() {
     fi
     (( rc >= 2 )) && break
   done
-  [[ -n $GAMES_SUMMARY ]] && digest_add "Mini-games: $GAMES_SUMMARY"
+  :
   if (( rc == 0 && CLAIM_MISSIONS )) && [[ -z $free ]]; then
     sleep "$(rand 5 20)"
     claim_missions; rc=$?
@@ -1107,21 +1118,6 @@ play_games() {
   return $rc
 }
 
-# true when a game is still to play today and its random time of day has come
-games_due() {
-  [[ -n $PLAY_GAMES ]] || return 1
-  local today g todo=0
-  today=$(paris_day)
-  for g in $PLAY_GAMES; do
-    [[ $(state_get "GAME_${g}_DAY" "") == "$today" ]] || todo=1
-  done
-  (( todo )) || return 1
-  if [[ $(state_get GAME_DAY "") != "$today" ]]; then
-    state_set GAME_DAY "$today"
-    state_set GAME_AT $(( $(TZ=Europe/Paris date -d "$today 00:00" +%s) + $(rand 32400 72000) ))
-  fi
-  (( $(now) >= $(state_get GAME_AT 0) ))
-}
 
 # ---------- daily quiz: who is it? ----------
 
@@ -1482,7 +1478,7 @@ do_missions() {
     sed 's/$/}/' | jq -r '[.kind, (.target - .progress)] | @tsv' 2>/dev/null | awk '!s[$1]++')
   if [[ -n $MISSION_DONE ]]; then
     ok "missions done: $MISSION_DONE"
-    digest_add "Missions done: $MISSION_DONE"
+    digest_add missions "$MISSION_DONE"
   fi
   return 0
 }
@@ -1535,7 +1531,7 @@ claim_missions() {
   claim_rewards || return $?
   if (( n > 0 )); then
     (( bonus > 0 )) && state_set BONUS $(( $(state_get BONUS 0) + bonus ))
-    digest_add "Missions claimed: $n, +$gems gems$( ((bonus > 0)) && echo ", +$bonus bonus booster(s)")"
+    digest_add claimed "$n mission(s), +$gems gems$( ((bonus > 0)) && echo ", +$bonus bonus booster(s)")"
   else
     log "missions: nothing to claim"
   fi
@@ -1602,7 +1598,7 @@ claim_rewards() {
   sleep "$(rand 3 10)"
   claim_on_page "/$LOCALE/collection/anime" '"franchiseId":null,"count":[1-9]' claimAnimeAction '[null]' "completed anime" || return 3
   state_set REWARDS_DAY "$(paris_day)"
-  [[ -n $REWARDS_SUMMARY ]] && digest_add "Rewards: $REWARDS_SUMMARY"
+  [[ -n $REWARDS_SUMMARY ]] && digest_add rewards "$REWARDS_SUMMARY"
   return 0
 }
 
@@ -1672,24 +1668,95 @@ pause_until() {
   echo "${p:-0}"
 }
 
+# the daily recap, as one Discord embed: yesterday's packs, today's games, missions and rewards
+recap_payload() {
+  local d=$1 games="" g r mythics missions claimed rewards img streak
+  load_stats
+  for g in $PLAY_GAMES; do
+    [[ $(state_get "GAME_${g}_DAY" "") == "$(paris_day)" ]] || continue
+    r=$(state_get "GAME_${g}_RESULT" "")
+    case $g in
+      anime) g="Mystery anime" ;; rarer) g="Rarer?" ;; memory) g="Memory pairs" ;; quiz) g="Who is it?" ;;
+    esac
+    games+="**$g** · $r"$'\n'
+  done
+  if [[ -f $DIGEST ]]; then
+    mythics=$(awk -F'\t' '$2 == "mythic" { print "✨ " $3 }' "$DIGEST")
+    img=$(awk -F'\t' '$2 == "mythic" && $4 != "" { i = $4 } END { print i }' "$DIGEST")
+    missions=$(awk -F'\t' '$2 == "missions" { print "• " $3 }' "$DIGEST")
+    claimed=$(awk -F'\t' '$2 == "claimed" { print "• " $3 }' "$DIGEST")
+    rewards=$(awk -F'\t' '$2 == "rewards" { print "• " $3 }' "$DIGEST")
+  fi
+  streak=$(state_get LOGIN_DAY "")
+  jq -nc --arg day "$(date -d "$d" '+%A %d %B')" --arg packs "${S_PACKS[$d]:-0}" \
+    --arg rare "${S_RARE[$d]:-0}" --arg epic "${S_EPIC[$d]:-0}" --arg leg "${S_LEG[$d]:-0}" --arg myth "${S_MYTH[$d]:-0}" \
+    --arg mythics "$mythics" --arg games "${games%$'\n'}" --arg missions "$missions" --arg claimed "$claimed" \
+    --arg rewards "$rewards" --arg img "$img" --arg streak "$streak" --arg preset "$PRESET" --arg stock "$(max_packs)" '
+    def field(n; v): if v == "" then empty else {name: n, value: (v | .[:1000]), inline: false} end;
+    {username: "oshibot", embeds: [{
+      title: ("🌙 Daily recap · " + $day),
+      color: 11032055,
+      description: ("**" + $packs + "** packs opened\n" +
+        "稀 " + $rare + " rare · 極 " + $epic + " epic · 伝 " + $leg + " legendary · 神 " + $myth + " mythic"),
+      fields: [
+        field("Mythic pulls"; $mythics),
+        field("🎮 Mini-games"; $games),
+        field("✅ Missions done"; $missions),
+        field("📬 Missions claimed"; $claimed),
+        field("🎁 Rewards"; $rewards),
+        (if $streak == "" then empty else {name: "📅 Login streak", value: ("Day " + $streak), inline: true} end),
+        {name: "📦 Free stock", value: ("Up to " + $stock), inline: true}
+      ],
+      thumbnail: (if $img == "" then null else {url: $img} end),
+      footer: {text: ("oshibot · " + $preset + " preset")},
+      timestamp: (now | todate)
+    }]}'
+}
+
 send_recap() {
   (( DAILY_RECAP )) && [[ -n $WEBHOOK ]] || return 0
   local d
   d=$(date -d "@$(( $(now) - 86400 ))" +%F)
-  load_stats
-  local msg="" news=""
-  (( ${S_PACKS[$d]:-0} > 0 )) && msg="**Yesterday:** $(recap_line "$d")."
-  if [[ -f $DIGEST ]]; then
-    news=$(awk -F'\t' -v d="$d" '$1 <= d { print "- " $2 }' "$DIGEST")
-    awk -F'\t' -v d="$d" '$1 > d' "$DIGEST" >"$DIGEST.tmp" && mv "$DIGEST.tmp" "$DIGEST"
+  discord_send "$(recap_payload "$d")"
+  [[ $HTTP_STATUS == 2* ]] && rm -f "$DIGEST"
+  return 0
+}
+
+hm_to_sec() { echo $(( 10#${1%:*} * 3600 + 10#${1#*:} * 60 )); }
+
+# the time of today's routine, drawn once a day in the window (Paris time)
+routine_at() {
+  local today base from to at
+  today=$(paris_day)
+  if [[ $(state_get ROUTINE_DATE "") != "$today" ]]; then
+    base=$(TZ=Europe/Paris date -d "$today 00:00" +%s)
+    from=$(hm_to_sec "$ROUTINE_FROM"); to=$(hm_to_sec "$ROUTINE_TO")
+    (( to > from )) || to=$(( from + 60 ))
+    at=$(( base + $(rand "$from" "$to") ))
+    state_set ROUTINE_DATE "$today"; state_set ROUTINE_AT "$at"
   fi
-  [[ -n $news ]] && msg+="${msg:+$'\n'}$news"
-  [[ -n $msg ]] && discord_text "${msg:0:1900}"
+  state_get ROUTINE_AT 0
+}
+
+routine_pending() { [[ $(state_get ROUTINE_DONE "") != "$(paris_day)" ]]; }
+
+# mini-games, missions, rewards, then the recap. 0 = ok, 2 = dead session, 3 = safety stop
+daily_routine() {
+  local rc=0
+  log "${B}daily routine${R}"
+  if [[ -n $PLAY_GAMES ]]; then
+    play_games; rc=$?
+  elif (( CLAIM_MISSIONS )); then
+    claim_missions; rc=$?
+  fi
+  (( rc >= 2 )) && return $rc
+  state_set ROUTINE_DONE "$(paris_day)"
+  send_recap
   return 0
 }
 
 cmd_run() {
-  local gap target first=1 last want pu fill rc
+  local gap target first=1 last want pu fill rc rat
   ensure_profile
   ensure_device
   load_browser
@@ -1698,10 +1765,7 @@ cmd_run() {
   plan_night
   log "loop started with the ${B}$PRESET${R} preset"
   while true; do
-    if (( $(now) >= WAKE )); then
-      plan_night
-      send_recap
-    fi
+    (( $(now) >= WAKE )) && plan_night
     pu=$(pause_until)
     if (( pu > $(now) )); then
       log "paused until $(date -d "@$pu" '+%a %d %b %H:%M')"
@@ -1728,6 +1792,29 @@ cmd_run() {
       fi
     fi
     target=$(next_session_at "$gap")
+    if routine_pending; then
+      rat=$(routine_at)
+      if (( rat <= target )); then
+        (( rat < $(now) + 60 )) && rat=$(( $(now) + $(rand 60 300) ))
+        state_set NEXT "$rat"
+        log "daily routine at $(date -d "@$rat" '+%a %H:%M') (in $(( (rat - $(now)) / 60 )) min)"
+        sleep $(( rat - $(now) ))
+        (( $(pause_until) > $(now) )) && continue
+        locked daily_routine; rc=$?
+        case $rc in
+          2) discord_text "oshibot lost its oshicards session: $(session_dead_reason)"; exit 2 ;;
+          3) exit 3 ;;
+        esac
+        continue
+      fi
+    else
+      # do not sleep through the start of tomorrow's routine window
+      rat=$(( $(TZ=Europe/Paris date -d "$(paris_day) tomorrow" +%s) + $(hm_to_sec "$ROUTINE_FROM") ))
+      if (( target > rat )); then
+        sleep $(( rat - $(now) > 0 ? rat - $(now) : 0 ))
+        continue
+      fi
+    fi
     state_set NEXT "$target"
     log "next session at $(date -d "@$target" '+%a %H:%M') (in $(( (target - $(now)) / 60 )) min)$( ((SLEEP_MIN > 0)) && echo ", night from $(date -d "@$BED" +%H:%M) to $(date -d "@$WAKE" +%H:%M)")$( ((DAY_FACTOR > 10)) && echo ', light day')"
     gap=$(( target - $(now) ))
@@ -1737,10 +1824,7 @@ cmd_run() {
     want=$(max_packs)
     (( want > 4 && $(rand 1 100) <= PARTIAL_CHANCE )) && want=$(rand 3 $(( want * 3 / 4 )))
     locked_session "$want"; rc=$?
-    if (( rc == 0 )) && games_due; then
-      sleep "$(rand 8 45)"
-      locked play_games; rc=$?
-    elif (( rc == 0 )) && missions_due; then
+    if (( rc == 0 )) && missions_due; then
       sleep "$(rand 5 30)"
       locked claim_missions; rc=$?
     fi
@@ -2124,6 +2208,7 @@ cmd_help() {
     ${c}oshibot packs${R}                 list the site's packs and which ones you open
     ${c}oshibot games${R} [name...]       play today's mini-games now: anime, rarer, memory, quiz
     ${c}oshibot missions${R}              do and claim the missions
+    ${c}oshibot routine${R}               run the nightly routine now: games, missions, rewards, recap
     ${c}oshibot friend${R} [username]     list your friends, or pick the one for the message mission
     ${c}oshibot pause${R} <duration>      take a break: 3d, 12h, 45m
     ${c}oshibot resume${R}                end a break, or restart after a safety stop
@@ -2158,6 +2243,8 @@ main() {
     friend) cmd_friend "$@" ;;
     games) ensure_profile; locked play_games "$@" ;;
     missions) ensure_profile; locked claim_missions ;;
+    routine) ensure_profile; locked daily_routine ;;
+    recap) ensure_profile; d=$(date -d yesterday +%F); [[ ${1:-} == preview ]] && recap_payload "$d" | jq . || send_recap ;;
     pause) cmd_pause "$@" ;;
     resume) cmd_resume ;;
     stats) cmd_stats ;;

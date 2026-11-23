@@ -50,7 +50,7 @@
 - 📅 **Daily login streak.** Claims the daily login reward the way the site's pages do when they load, so the first session of the day collects it.
 - 🎯 **Daily mini-games (opt-in).** Plays "Mystery anime", "Rarer?", "Memory pairs" and the "Who is it?" quiz once a day, with random pauses between answers.
 - ✅ **Missions and rewards (opt-in).** Does most daily and weekly missions, claims them as soon as they are finished, and once a day the weekly boss reward, season pass tiers, achievements and completed anime.
-- 🔔 **Discord notifications, kept quiet.** Legendary and mythic pulls with the card art, and an alert when the tool stops or needs you. Everything else (mini-games, missions, rewards) is gathered into one recap a day.
+- 🔔 **Discord notifications, kept quiet.** Legendary and mythic pulls with the card art, and an alert when the tool stops or needs you. Everything else is gathered into one recap a night, sent after the daily routine. The rarities posted right away are the `NOTIFY_RARITIES` setting.
 
 ## 📋 Requirements
 
@@ -144,6 +144,8 @@ The profile is a plain `profile` file next to the script. You can edit it freely
 | `oshibot packs` | List the site's packs, their cost and availability, and which ones you open |
 | `oshibot games [name...]` | Play today's mini-games now: `anime`, `rarer`, `memory`, `quiz` |
 | `oshibot missions` | Do and claim the missions |
+| `oshibot routine` | Run the nightly routine now: games, missions, rewards, recap |
+| `oshibot recap [preview]` | Post the recap now, or print it without posting |
 | `oshibot friend [username]` | List your friends, or pick the one for the message mission |
 | `oshibot pause <duration>` | Stop playing for a while: `3d`, `12h`, `45m` |
 | `oshibot resume` | Cancel a pause, or restart after a safety stop |
@@ -185,7 +187,7 @@ PLAY_GAMES="anime rarer memory quiz"   # any subset, empty = none
 CLAIM_MISSIONS=1
 ```
 
-Once a day, `oshibot` draws a time between 09:00 and 20:00 (Paris time). At the first pack session after that time, it plays the rewarded game of each mini-game listed, then claims the missions. `oshibot games` and `oshibot missions` do it right away.
+Every night, at a random time between 00:01 and 01:00 (Paris time, the `ROUTINE_FROM` and `ROUTINE_TO` settings), `oshibot` runs its daily routine: it plays the rewarded game of each mini-game listed, does and claims the missions, claims the other rewards, then posts the recap on Discord. This happens even during the night break of your preset. `oshibot games` and `oshibot missions` do it right away.
 
 | Game | How it is played | Reward |
 |---|---|---|
