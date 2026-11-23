@@ -48,13 +48,13 @@
 - 🛑 **Safety stop.** If the site answers anything unexpected (a block page, an unknown error), the tool stops and alerts you instead of insisting.
 - 🔄 **Self-renewing session.** Paste your cookie once. The access token is refreshed automatically from then on.
 - 📅 **Daily login streak.** Claims the daily login reward the way the site's pages do when they load, so the first session of the day collects it.
-- 🎯 **Daily mini-games (opt-in).** Plays "Mystery anime", "Rarer?" and "Memory pairs" once a day, with random pauses between answers.
+- 🎯 **Daily mini-games (opt-in).** Plays "Mystery anime", "Rarer?", "Memory pairs" and the "Who is it?" quiz once a day, with random pauses between answers.
 - ✅ **Missions and rewards (opt-in).** Claims daily and weekly missions as soon as they are finished, and once a day the weekly boss reward, season pass tiers, achievements and completed anime.
 - 🔔 **Discord notifications.** Legendary and mythic pulls with the card art, a daily recap, mini-game scores, claimed missions, and an alert if the tool stops.
 
 ## 📋 Requirements
 
-Linux with `bash` 4.2+, `curl`, `jq`, GNU coreutils, GNU `grep` and `flock` (util-linux). All of them ship with common distributions except sometimes `jq`. `systemd` is only needed for the background service.
+Linux with `bash` 4.2+, `curl`, `jq`, GNU coreutils, GNU `grep` and `flock` (util-linux). The quiz also needs Python 3 with Pillow. All of them ship with common distributions except sometimes `jq`. `systemd` is only needed for the background service.
 
 ## 🚀 Quick start
 
@@ -142,7 +142,7 @@ The profile is a plain `profile` file next to the script. You can edit it freely
 | `oshibot webhook <url>` | Set the Discord webhook (`test` to try it, `off` to remove it) |
 | `oshibot open [n] [pack]` | Play one session now: empty the free stock, or `n` packs at most |
 | `oshibot packs` | List the site's packs, their cost and availability, and which ones you open |
-| `oshibot games [name...]` | Play today's mini-games now: `anime`, `rarer`, `memory` |
+| `oshibot games [name...]` | Play today's mini-games now: `anime`, `rarer`, `memory`, `quiz` |
 | `oshibot missions` | Claim the missions that are finished |
 | `oshibot pause <duration>` | Stop playing for a while: `3d`, `12h`, `45m` |
 | `oshibot resume` | Cancel a pause, or restart after a safety stop |
@@ -180,7 +180,7 @@ collector-prestige     Prestige Edition           gems   always
 Both are off by default. Turn them on in the `profile` file:
 
 ```bash
-PLAY_GAMES="anime rarer memory"   # any subset, empty = none
+PLAY_GAMES="anime rarer memory quiz"   # any subset, empty = none
 CLAIM_MISSIONS=1
 ```
 
@@ -190,9 +190,12 @@ Once a day, `oshibot` draws a time between 09:00 and 20:00 (Paris time). At the 
 |---|---|---|
 | Mystery anime (`anime`) | The site shows a character. Its card page on the site names its anime, which is the answer. | up to 30 gems |
 | Rarer? (`rarer`) | Uses the rarity of cards already seen, else the character's popularity on AniList. One wrong answer ends the game. | 3 gems per correct answer, 30 at most |
+| Who is it? (`quiz`) | Two throwaway guesses reveal the anime. The pixelated picture is then compared with the pictures of that anime's cards, and the last guess is only sent when one card clearly stands out. Otherwise you get the candidates on Discord and finish it yourself. Needs Pillow (`apt install python3-pil`). | up to 50 gems, on top of the daily cap |
 | Memory pairs (`memory`) | Nothing is revealed before a card is flipped, so it remembers every card seen and never flips a known pair wrong. | 25 gems in 8 moves or fewer, 15 up to 11 moves, 10 beyond |
 
-The site caps the five mini-games at 50 gems a day in total, which these three can reach on their own. "Scrambled page", "Duel" and the daily "Who is it?" quiz are not played: they need image analysis or a combat strategy.
+The site caps the five mini-games at 50 gems a day in total, which these three can reach on their own. "Scrambled page", "Daily dungeon" and the multiplayer games are not played.
+
+About "Who is it?": the reward grows with your daily streak (5 gems a day, up to 50) and a missed day resets it, so the tool never risks the last guess on a doubt. Wrong guesses do not lower the reward.
 
 About "Rarer?":
 

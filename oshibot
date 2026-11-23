@@ -184,7 +184,8 @@ DAILY_RECAP=$DAILY_RECAP
 USE_BONUS=$USE_BONUS
 # claim the daily login reward, as the site does from every page it loads
 DAILY_LOGIN=$DAILY_LOGIN
-# daily mini-games to play, among: anime rarer memory (empty = none)
+# daily mini-games to play, among: anime rarer memory quiz (empty = none).
+# quiz needs Pillow (Debian: apt install python3-pil)
 PLAY_GAMES="$PLAY_GAMES"
 # claim finished missions
 CLAIM_MISSIONS=$CLAIM_MISSIONS
@@ -1064,8 +1065,8 @@ play_games() {
   for a in "$@"; do
     case $a in
       free) free=free ;;
-      anime | rarer | memory) list+=("$a") ;;
-      *) die "unknown game: $a (anime, rarer or memory)" ;;
+      anime | rarer | memory | quiz) list+=("$a") ;;
+      *) die "unknown game: $a (anime, rarer, memory or quiz)" ;;
     esac
   done
   (( ${#list[@]} )) || read -r -a list <<<"${PLAY_GAMES:-anime rarer memory}"
@@ -1074,7 +1075,12 @@ play_games() {
     [[ -z $free && $(state_get "GAME_${g}_DAY" "") == "$(paris_day)" ]] && continue
     (( first )) || sleep "$(rand 15 60)"
     first=0
-    play_game "$g" "$free"; rc=$?
+    if [[ $g == quiz ]]; then
+      [[ -n $free ]] && continue
+      play_quiz; rc=$?
+    else
+      play_game "$g" "$free"; rc=$?
+    fi
     (( rc >= 2 )) && break
   done
   [[ -n $GAMES_SUMMARY ]] && discord_text "Mini-games played today: $GAMES_SUMMARY."
@@ -1099,6 +1105,171 @@ games_due() {
     state_set GAME_AT $(( $(TZ=Europe/Paris date -d "$today 00:00" +%s) + $(rand 32400 72000) ))
   fi
   (( $(now) >= $(state_get GAME_AT 0) ))
+}
+
+# ---------- daily quiz: who is it? ----------
+
+# Compares the pixelated picture $1 with the candidates listed in $2 ("name<TAB>image path").
+# Prints "name<TAB>distance<TAB>second name<TAB>ratio"; ratio = how much better the best one is.
+quiz_match() {
+  python3 -I - "$1" "$2" <<'PY'
+import sys, html
+from PIL import Image
+GW, GH = 10, 15
+def grid(path):
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    tw, th = (w, w * 3 // 2) if h * 2 >= w * 3 else (h * 2 // 3, h)
+    im = im.crop(((w - tw) // 2, 0, (w - tw) // 2 + tw, th)).resize((GW, GH), Image.BOX)
+    return list(im.getdata())
+q = grid(sys.argv[1])
+best = {}
+for line in open(sys.argv[2], encoding="utf-8"):
+    name, path = line.rstrip("\n").split("\t")
+    try:
+        g = grid(path)
+    except Exception:
+        continue
+    d = sum((a - b) ** 2 for p, r in zip(q, g) for a, b in zip(p, r)) / len(q)
+    name = html.unescape(name)
+    if name not in best or d < best[name]:
+        best[name] = d
+res = sorted((d, n) for n, d in best.items())
+if not res:
+    sys.exit(1)
+b = res[0]
+s = res[1] if len(res) > 1 else (float("inf"), "")
+print(f"{b[1]}\t{b[0]:.0f}\t{s[1]}\t{(s[0] / b[0]) if b[0] else 99:.2f}")
+PY
+}
+
+# the site's address for an anime title: "Komi Can't Communicate" -> komi-can-t-communicate
+anime_slug() {
+  tr '[:upper:]' '[:lower:]' <<<"$1" | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-80 | sed -E 's/-+$//'
+}
+
+QUIZ_STATE=""
+quiz_read_state() {
+  QUIZ_STATE=$(page_stream "$1" | grep -oP '"initial":\K\{"day":".*?"max_tries":\d+\}' | head -1)
+  jq -e .day >/dev/null 2>&1 <<<"$QUIZ_STATE"
+}
+
+quiz_guess() {
+  local st
+  if ! call_action quizGuessAction "/$LOCALE/quiz" "$(jq -nc --arg g "$1" '[$g]')" "$QUIZ_HTML"; then
+    [[ $ACT_STATUS == 403 || $ACT_STATUS == 429 ]] && { halt "a quiz guess answered HTTP $ACT_STATUS"; return 3; }
+    warn "quiz: guess refused (HTTP $ACT_STATUS)"; return 1
+  fi
+  st=$(jq -c '.state // empty' <<<"$ACT_BODY" 2>/dev/null)
+  if [[ -z $st ]]; then
+    warn "quiz: $(jq -r '.error // "no answer returned"' <<<"$ACT_BODY" 2>/dev/null)"; return 1
+  fi
+  QUIZ_STATE=$st
+}
+
+# Plays the daily quiz: two throwaway guesses reveal the anime, then the pixelated picture is
+# compared with that anime's cards. The last guess is only sent when one card clearly stands out,
+# otherwise you get the candidates on Discord. 0 = done or skipped, 2 = dead session, 3 = safety stop
+QUIZ_HTML=""
+play_quiz() {
+  local rc today tries hint slug dir html list match name dist second ratio n junk played=0
+  today=$(paris_day)
+  python3 -I -c 'import PIL' 2>/dev/null || { warn "quiz: Pillow is missing (apt install python3-pil), skipped"; return 0; }
+  [[ -f $HALT ]] && { err "stopped earlier: $(<"$HALT") (run: ${B}oshibot resume${R})"; return 3; }
+  load_browser
+  ensure_session; rc=$?
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) && return 0
+  visit_page "/$LOCALE/quiz"
+  QUIZ_HTML=$PAGE_HTML
+  case $PAGE_CODE in
+    200) ;;
+    403 | 429) rm -f "$QUIZ_HTML"; halt "the quiz page answered HTTP $PAGE_CODE, the site may be blocking this tool"; return 3 ;;
+    *) rm -f "$QUIZ_HTML"; warn "quiz page unreachable ($PAGE_CODE)"; return 0 ;;
+  esac
+  if ! quiz_read_state "$QUIZ_HTML"; then
+    rm -f "$QUIZ_HTML"; warn "quiz: could not read today's quiz"; return 0
+  fi
+  if [[ $(jq -r .finished <<<"$QUIZ_STATE") == true ]]; then
+    rm -f "$QUIZ_HTML"
+    state_set GAME_quiz_DAY "$today"
+    state_set GAME_quiz_RESULT "$(jq -r 'if .solved then "found \(.answer.name // ""), +\(.gems // 0) gems" else "missed" end' <<<"$QUIZ_STATE")"
+    log "quiz: already played today"; return 0
+  fi
+  LAST_PING=0
+  presence_ping
+
+  # throwaway guesses until the anime is given
+  for ((n = 0; n < 3; n++)); do
+    [[ $(jq -r .finished <<<"$QUIZ_STATE") == true || -n $(jq -r '.hint // empty' <<<"$QUIZ_STATE") ]] && break
+    (( $(jq -r '.max_tries - .tries' <<<"$QUIZ_STATE") > 1 )) || break
+    junk=$(shuf -n1 -e "je sais pas" "aucune idée" "hmm" "?" "jsp" "pas la moindre idée")
+    idle "$(rand 4 12)"
+    quiz_guess "$junk"; rc=$?
+    (( rc == 3 )) && { rm -f "$QUIZ_HTML"; return 3; }
+    (( rc == 1 )) && { rm -f "$QUIZ_HTML"; return 0; }
+  done
+
+  if [[ $(jq -r .finished <<<"$QUIZ_STATE") != true ]]; then
+    hint=$(jq -r '.hint // empty' <<<"$QUIZ_STATE")
+    tries=$(jq -r .tries <<<"$QUIZ_STATE")
+    if [[ -z $hint ]]; then
+      rm -f "$QUIZ_HTML"; warn "quiz: no hint given, left for you"; return 0
+    fi
+    if [[ $(state_get QUIZ_ASKED "") == "$today" ]]; then
+      rm -f "$QUIZ_HTML"; log "quiz: waiting for you to finish it"; return 0
+    fi
+    dir=$(mktemp -d)
+    slug=$(anime_slug "$hint")
+    visit_page "/$LOCALE/anime/$slug"
+    html=$PAGE_HTML
+    if [[ $PAGE_CODE == 200 ]]; then
+      grep -oP '<a class="group relative block" aria-label="[^"]*" href="/[a-z]{2}/card/\d+">.*?</a>' "$html" |
+        awk '!seen[$0]++' | while IFS= read -r a; do
+          local id nm src
+          id=$(grep -oP 'href="/[a-z]{2}/card/\K\d+' <<<"$a")
+          nm=$(grep -oP 'aria-label="\K[^"]*' <<<"$a")
+          src=$(grep -oP '<img[^>]*src="\K[^"]+' <<<"$a" | head -1)
+          [[ -n $src && ! -s $dir/$id ]] || continue
+          "$CURL_BIN" -sS -m 20 "${BROWSER[@]}" -H "Referer: $SITE/$LOCALE/anime/$slug" -o "$dir/$id" "$src" 2>/dev/null &&
+            printf '%s\t%s\n' "$nm" "$dir/$id"
+        done >"$dir/list"
+    fi
+    rm -f "$html"
+    "$CURL_BIN" -sS -m 30 "${BROWSER[@]}" -H "$(cookie_header)" -H "Referer: $SITE/$LOCALE/quiz" --compressed \
+      -o "$dir/quiz" "$SITE/api/quiz/image?d=$(jq -r .day <<<"$QUIZ_STATE")&s=$(( tries < 2 ? tries : 2 ))" 2>/dev/null
+    match=""
+    [[ -s $dir/list && -s $dir/quiz ]] && match=$(quiz_match "$dir/quiz" "$dir/list" 2>/dev/null)
+    rm -rf "$dir"
+    IFS=$'\t' read -r name dist second ratio <<<"$match"
+    if [[ -z $name ]] || ! awk -v r="${ratio:-0}" 'BEGIN { exit !(r >= 2) }'; then
+      state_set QUIZ_ASKED "$today"
+      warn "quiz: not sure (${name:-no candidate}${second:+ or $second}), left for you"
+      discord_text "\"Who is it?\" needs you today: the anime is **$hint**. $([[ -n $name ]] && echo "Best guesses: $name or $second." || echo "No candidate found.") One try left, finish it on the site."
+      rm -f "$QUIZ_HTML"; return 0
+    fi
+    log "quiz: anime \"$hint\", picture matches $name (${ratio}x closer than $second)"
+    idle "$(rand 6 15)"
+    quiz_guess "$name"; rc=$?
+    played=1
+    (( rc == 3 )) && { rm -f "$QUIZ_HTML"; return 3; }
+    (( rc == 1 )) && { rm -f "$QUIZ_HTML"; return 0; }
+  fi
+  rm -f "$QUIZ_HTML"
+
+  if (( played )) && [[ $(jq -r .finished <<<"$QUIZ_STATE") == true ]]; then
+    state_set GAME_quiz_DAY "$today"
+    if [[ $(jq -r '.solved // .correct' <<<"$QUIZ_STATE") == true ]]; then
+      state_set GAME_quiz_RESULT "$(jq -r '"found \(.answer.name // ""), +\(.gems // 0) gems"' <<<"$QUIZ_STATE")"
+      ok "quiz: $(state_get GAME_quiz_RESULT "")"
+      GAMES_SUMMARY+="${GAMES_SUMMARY:+; }quiz $(state_get GAME_quiz_RESULT "")"
+    else
+      state_set GAME_quiz_RESULT "missed"
+      warn "quiz: missed, the answer was $(jq -r '.answer.name // "?"' <<<"$QUIZ_STATE")"
+      discord_text "\"Who is it?\" was missed today: the answer was $(jq -r '.answer.name // "?"' <<<"$QUIZ_STATE"). The streak starts over."
+    fi
+  fi
+  return 0
 }
 
 # ---------- missions ----------
@@ -1693,7 +1864,7 @@ cmd_help() {
     ${c}oshibot stats${R}                 packs and rarities over the last 7 days
     ${c}oshibot open${R} [n] [pack]       play one session now (whole free stock, or n packs)
     ${c}oshibot packs${R}                 list the site's packs and which ones you open
-    ${c}oshibot games${R} [name...]       play today's mini-games now: anime, rarer, memory
+    ${c}oshibot games${R} [name...]       play today's mini-games now: anime, rarer, memory, quiz
     ${c}oshibot missions${R}              claim the missions that are finished
     ${c}oshibot pause${R} <duration>      take a break: 3d, 12h, 45m
     ${c}oshibot resume${R}                end a break, or restart after a safety stop
