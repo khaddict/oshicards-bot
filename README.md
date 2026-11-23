@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>An auto pack opener bot for <a href="https://oshicards.com">oshicards</a>.</b><br>
-  Opens your free boosters at a human pace and pings Discord when you pull something shiny.
+  Opens your free boosters at a human pace, plays the daily mini-games, does your missions and pings Discord when you pull something shiny.
 </p>
 
 <p align="center">
@@ -19,18 +19,18 @@
 `oshibot` is a single-file Bash tool: one script, no build step, and a guided setup.
 
 ```
-09:14:02 pack 1
+09:14:02 pack 1 (rivals-2026)
            common     Usopp (ONE PIECE)
            common     Hange Zoe (Attack on Titan) NEW
            common     Shoyo Hinata (HAIKYU!!)
            uncommon   Mob (Mob Psycho 100) NEW
            rare       Holo (Spice and Wolf)
-09:14:21 pack 2 (golden)
+09:14:21 pack 2 (rivals-2026) (golden)
            rare       Senku Ishigami (Dr. STONE) NEW
            rare       Maomao (The Apothecary Diaries)
            rare       Thorfinn (Vinland Saga) NEW
            epic       Frieren (Frieren: Beyond Journey's End)
-           epic       Spike Spiegel (Cowboy Bebop) NEW
+           mythic     Spike Spiegel [Rivals] (Cowboy Bebop) NEW
 09:14:21 OK 2 pack(s) opened
 ```
 
@@ -39,22 +39,19 @@
 
 ## ✨ Features
 
-- 📦 **Any free pack.** Standard by default. Event and themed packs can be listed in order of preference, and the bot falls back to the next one when an event ends.
-- 🎁 **Free boosters only.** Every request is sent with `maxGems: 0`, and the tool stops itself if a gem is ever spent.
-- 🗓️ **A schedule of your own.** Each install draws its own random profile: bedtime, sleep length, session rhythm, weekday quiet hours, weekend shift. No two installs play alike.
+- 🎁 **Free boosters only.** Every pack is opened with `maxGems: 0`, and the tool stops itself if a gem is ever spent.
+- 📦 **Any free pack.** Standard by default. Event and themed packs can be listed in order of preference, with an automatic fallback when an event ends.
+- 🗓️ **A schedule of your own.** Each install draws its own random profile: bedtime, sleep length, session rhythm, weekday quiet hours, weekend shift.
 - 🎮 **Four play styles.** `chill`, `regular`, `grinder` or `nonstop`, depending on how many packs you want and how much you want to stand out.
-- 🪪 **Your browser's identity.** Setup copies your real user agent and language, so requests look like the browser you normally play with.
-- 👀 **Looks like an open tab.** Loads the pack page before playing, keeps the site's device cookies, and sends the same presence heartbeat as the web app.
-- 🛑 **Safety stop.** If the site answers anything unexpected (a block page, an unknown error), the tool stops and alerts you instead of insisting.
-- 🔄 **Self-renewing session.** Paste your cookie once. The access token is refreshed automatically from then on.
-- 📅 **Daily login streak.** Claims the daily login reward the way the site's pages do when they load, so the first session of the day collects it.
-- 🎯 **Daily mini-games (opt-in).** Plays "Mystery anime", "Rarer?", "Memory pairs" and the "Who is it?" quiz once a day, with random pauses between answers.
-- ✅ **Missions and rewards (opt-in).** Does most daily and weekly missions, claims them as soon as they are finished, and once a day the weekly boss reward, season pass tiers, achievements and completed anime.
-- 🔔 **Discord notifications, kept quiet.** Legendary and mythic pulls with the card art, and an alert when the tool stops or needs you. Everything else is gathered into one recap a night, sent after the daily routine. The rarities posted right away are the `NOTIFY_RARITIES` setting.
+- 🪪 **Looks like your browser.** Copies your user agent and language, loads the pages before acting, keeps the site's device cookies and sends the same presence heartbeat as the web app.
+- 🔄 **Self-renewing session.** Paste your cookie once. The access token is renewed automatically from then on.
+- 🌙 **Nightly routine (opt-in).** Between 00:01 and 01:00, plays four mini-games, does and claims the daily and weekly missions, claims the other rewards, then posts a recap.
+- 🔔 **Quiet Discord.** Rare pulls with the card art, alerts when the tool stops or needs you, and one recap a night. Nothing else.
+- 🛑 **Safety stop.** If the site answers anything unexpected, the tool stops and alerts you instead of insisting.
 
 ## 📋 Requirements
 
-Linux with `bash` 4.2+, `curl`, `jq`, GNU coreutils, GNU `grep` and `flock` (util-linux). The quiz also needs Python 3 with Pillow. All of them ship with common distributions except sometimes `jq`. `systemd` is only needed for the background service.
+Linux with `bash` 4.2+, `curl`, `jq`, GNU coreutils, GNU `grep` and `flock` (util-linux). All of them ship with common distributions, except sometimes `jq`. The "Who is it?" quiz also needs Python 3 with Pillow (`apt install python3-pil`). `systemd` is only needed for the background service.
 
 ## 🚀 Quick start
 
@@ -78,16 +75,18 @@ Each step also exists on its own:
 sudo ./oshibot install           # start the background loop
 ```
 
+The mini-games, missions and rewards are off until you turn them on in the `profile` file (see [Nightly routine](#-nightly-routine)).
+
 ## 🔑 Connecting your account
 
 Run `./oshibot cookie` and follow the prompt. In short:
 
-1. Open oshicards in a **private browsing window** of your usual browser and log in.
+1. Open oshicards in a **new private browsing window** of your usual browser and log in.
 2. Press F12, open the **Console** tab and paste the line the tool shows you.
 3. Paste the result into the prompt.
 4. Close the private window **right away, without logging out**.
 
-The line copies your session cookie together with your browser's user agent and language. The private window matters: the tool takes over that login, and your regular browser keeps its own. Logging out would revoke the session the tool just saved, and leaving the window open makes the two log each other out (see "The session keeps dying" below).
+The line copies your session cookie together with your browser's user agent and language. The private window matters: the tool takes over that login, and your regular browser keeps its own. Logging out would revoke the session the tool just saved, and leaving the window open makes the two log each other out (see [The session keeps dying](#-the-session-keeps-dying)).
 
 You can also pass a file (`oshibot cookie paste.txt`) or pipe the paste on stdin.
 
@@ -97,14 +96,14 @@ You can also pass a file (`oshibot cookie paste.txt`) or pipe the paste on stdin
 |---|---|---|---|
 | 🌙 `chill` | 30 to 40 | 3 to 4 | a casual player |
 | 🎯 `regular` | 50 to 70 | 4 to 6 | a dedicated player |
-| 🔥 `grinder` | 100 to 110 | 10 to 12 | the realistic maximum for a human |
-| 🤖 `nonstop` | 130 to 135 | 14 to 15 | nobody: it plays around the clock |
+| 🔥 `grinder` | 95 to 110 | 10 to 12 | the realistic maximum for a human |
+| 🤖 `nonstop` | 125 to 135 | 14 to 15 | nobody: it plays around the clock |
 
 Figures come from simulations of randomly drawn profiles over one to two weeks, with a stock of 12 boosters. The theoretical maximum is 144 packs per day.
 
-`nonstop` has no night break. It keeps the random gaps and pauses, but an account that plays every hour of every day is not a human one, so it is by far the easiest preset to spot. Only use it on an account you do not mind losing.
+`nonstop` has no night break. It keeps the random gaps and pauses, but an account that plays every hour of every day is not a human one, so it is by far the easiest preset to spot.
 
-Free boosters regenerate at one every 10 minutes, up to a stock of 10. Some quests raise that limit. `oshibot` reads the real stock size and refill rate of your account from the site's answers, so nothing is hardcoded. Bonus boosters earned from quests and missions are opened too, once the free stock is empty (set `USE_BONUS=0` in the profile to keep them). Emptying the stock just before it is full loses nothing, so even `grinder` never hammers the API.
+Free boosters regenerate at one every 10 minutes, up to a stock of 10 that the season pass and some quests raise. `oshibot` reads the real stock size and refill rate of your account from the site's answers. Bonus boosters are opened too, once the free stock is empty (`USE_BONUS=0` keeps them). Emptying the stock just before it is full loses nothing, so even `grinder` never hammers the site.
 
 Switch or redraw at any time with `oshibot profile <preset>`, and see what you got with `oshibot profile`:
 
@@ -117,7 +116,7 @@ Between packs: 9 to 24 s
 Light days   : 11% of days, partial sessions: 14%, delayed sessions: 9%
 ```
 
-## 🎲 What a profile randomizes
+### What a profile randomizes
 
 | Behaviour | Drawn once per install | Varies every day |
 |---|---|---|
@@ -128,32 +127,6 @@ Light days   : 11% of days, partial sessions: 14%, delayed sessions: 9%
 | Pause between packs | its own range | each pause, with occasional long ones |
 | Light days | how often (none with `nonstop`) | which days |
 | Partial sessions | how often | which sessions leave part of the stock |
-
-The profile is a plain `profile` file next to the script. You can edit it freely, and `git pull` never touches it. All times use the machine's local timezone, except the mini-games, which follow the site's day (Paris time).
-
-## ⌨️ Commands
-
-| Command | What it does |
-|---|---|
-| `oshibot setup` | Guided setup: account, play style, Discord, service |
-| `oshibot cookie [file]` | Connect your account, with a step by step guide |
-| `oshibot browser [file]` | Save your browser's identity without changing the session |
-| `oshibot profile [preset]` | Show your profile, or draw a new one |
-| `oshibot webhook <url>` | Set the Discord webhook (`test` to try it, `off` to remove it) |
-| `oshibot open [n] [pack]` | Play one session now: empty the free stock, or `n` packs at most |
-| `oshibot packs` | List the site's packs, their cost and availability, and which ones you open |
-| `oshibot games [name...]` | Play today's mini-games now: `anime`, `rarer`, `memory`, `quiz` |
-| `oshibot missions` | Do and claim the missions |
-| `oshibot routine` | Run the nightly routine now: games, missions, rewards, recap |
-| `oshibot recap [preview]` | Post the recap now, or print it without posting |
-| `oshibot friend [username]` | List your friends, or pick the one for the message mission |
-| `oshibot pause <duration>` | Stop playing for a while: `3d`, `12h`, `45m` |
-| `oshibot resume` | Cancel a pause, or restart after a safety stop |
-| `oshibot status` | Account, profile, next session, today's pulls |
-| `oshibot stats` | Packs and rarities over the last 7 days |
-| `oshibot install` / `uninstall` | Add or remove the systemd service |
-| `oshibot logs` | Follow the service logs |
-| `oshibot run` | Run the loop in the foreground, without systemd |
 
 ## 📦 Choosing the packs
 
@@ -178,76 +151,130 @@ collector-prestige     Prestige Edition           gems   always
 
 `oshibot open 3 shonen` opens three packs of a given type right away, whatever `PACKS` says.
 
-## 🎯 Mini-games and missions
+## 🌙 Nightly routine
 
-Both are off by default. Turn them on in the `profile` file:
+Every night, at a random time between `ROUTINE_FROM` and `ROUTINE_TO` (00:01 and 01:00 by default, Paris time, like the site's day), `oshibot`:
+
+1. plays the rewarded game of each mini-game in `PLAY_GAMES`,
+2. does the missions in `DO_MISSIONS` and claims every finished mission,
+3. claims the other rewards: weekly boss, season pass tiers, achievements, completed anime,
+4. posts the recap on Discord.
+
+It runs even during the night break of your preset. `oshibot routine` runs it right away. During the day, missions are still checked and claimed every two to four hours, after a pack session.
 
 ```bash
-PLAY_GAMES="anime rarer memory quiz"   # any subset, empty = none
-CLAIM_MISSIONS=1
+PLAY_GAMES="anime rarer memory quiz"
+DO_MISSIONS="banner wishlist chat auction sell exchange recycle"
+MISSION_FRIEND="eikosensei"   # pick one with: oshibot friend
+AUCTION_MAX_GEMS=50
+CLAIM_MISSIONS=1              # also claim the other rewards; finished missions are always claimed
 ```
 
-Every night, at a random time between 00:01 and 01:00 (Paris time, the `ROUTINE_FROM` and `ROUTINE_TO` settings), `oshibot` runs its daily routine: it plays the rewarded game of each mini-game listed, does and claims the missions, claims the other rewards, then posts the recap on Discord. This happens even during the night break of your preset. `oshibot games` and `oshibot missions` do it right away.
+### Mini-games
 
 | Game | How it is played | Reward |
 |---|---|---|
 | Mystery anime (`anime`) | The site shows a character. Its card page on the site names its anime, which is the answer. | up to 30 gems |
-| Rarer? (`rarer`) | Uses the rarity of cards already seen, else the character's popularity on AniList. One wrong answer ends the game. | 3 gems per correct answer, 30 at most |
-| Who is it? (`quiz`) | Two throwaway guesses reveal the anime. The pixelated picture is then compared with the pictures of that anime's cards, and the last guess is only sent when one card clearly stands out. Otherwise you get the candidates on Discord and finish it yourself. Needs Pillow (`apt install python3-pil`). | up to 50 gems, on top of the daily cap |
-| Memory pairs (`memory`) | Nothing is revealed before a card is flipped, so it remembers every card seen and never flips a known pair wrong. | 25 gems in 8 moves or fewer, 15 up to 11 moves, 10 beyond |
+| Rarer? (`rarer`) | Uses the rarity of cards already seen, else the character's popularity on AniList. One wrong answer ends the game. | 3 gems per correct answer |
+| Memory pairs (`memory`) | Nothing is revealed before a card is flipped, so it remembers every card seen and never flips a known pair wrong. | 25 gems in 8 moves or fewer, 15 up to 11, 10 beyond |
+| Who is it? (`quiz`) | Two throwaway guesses reveal the anime. The pixelated picture is then compared with the pictures of that anime's cards. | up to 50 gems, on top of the daily cap |
 
-The site caps the five mini-games at 50 gems a day in total, which these three can reach on their own. "Scrambled page", "Daily dungeon" and the multiplayer games are not played.
+The site caps the mini-games at 50 gems a day in total, "Who is it?" excepted. "Scrambled page", "Daily dungeon" and the multiplayer games are not played.
 
-About "Who is it?": the reward grows with your daily streak (5 gems a day, up to 50) and a missed day resets it, so the tool never risks the last guess on a doubt. Wrong guesses do not lower the reward.
+**About "Who is it?".** Its reward grows with your daily streak (5 gems a day, up to 50), and a missed day resets the streak. So the last guess is only sent when one card clearly stands out. Otherwise you get the anime and the two best candidates on Discord, and you finish it yourself. Wrong guesses do not lower the reward.
 
-About "Rarer?":
+**About "Rarer?".** Every card from an opened pack, and every card revealed by a game, is saved with its true rarity in `rarity.tsv`. When both cards of a round are known, the answer is certain. Otherwise rarity follows popularity: the card's picture address holds its AniList character id, and `oshibot` asks the public [AniList API](https://anilist.co) for the favourites of both characters. This is the only request sent to a third party, and it only contains the two ids. A few classics are always Mythic on the site whatever their popularity; they are learned the first time they come up.
 
-1. **What it has already seen.** Every card from an opened pack, and every card revealed by a game, is saved with its true rarity in `rarity.tsv`. When both cards of a round are known, the answer is certain.
-2. **Popularity otherwise.** On the site, rarity follows how popular a character is on AniList. The card's image address contains the AniList character id, so `oshibot` asks the public [AniList API](https://anilist.co) for the favourites of both characters and picks the higher one. This is the only request the tool sends to a third party, and it only contains the two character ids.
-
-It is not perfect: a few classics are always Mythic on the site whatever their popularity. Those cards are learned the first time they come up, so the hit rate improves with time. In early testing, 27 rounds out of 28 were answered correctly over three games.
-
-### Doing the missions
-
-List the missions the tool may do in the `profile` file:
-
-```bash
-DO_MISSIONS="banner wishlist chat auction sell exchange recycle"
-MISSION_FRIEND="eikosensei"   # set with: oshibot friend <username>
-AUCTION_MAX_GEMS=50
-```
+### Missions
 
 | Mission | What the tool does |
 |---|---|
 | Open the weekly banner pack (`banner`) | Opens the banner's free pack of the day, never a paid one. |
 | Add a card to your wishlist (`wishlist`) | Wishes a card you do not own yet. |
-| Send a message to a friend (`chat`) | Sends a short greeting to `MISSION_FRIEND`, and only to them. |
+| Send a message to a friend (`chat`) | Sends a short friendly message to `MISSION_FRIEND`, and only to them. |
 | Bid on an auction (`auction`) | Places the minimum bid on the cheapest auction, up to `AUCTION_MAX_GEMS`. You may win it and pay. |
-| Sell a card on the market (`sell`) | Lists one duplicate for 48 hours at the site's suggested price. |
+| Sell a card on the market (`sell`) | Lists one duplicate for 48 hours at the site's suggested price, then waits for a buyer. |
 | Exchange duplicates (`exchange`) | Gives 5 common duplicates for 1 random uncommon. |
 | Recycle duplicates (`recycle`) | Recycles as many duplicates as the mission asks, for gems. |
 
-`sell`, `exchange` and `recycle` only touch common and uncommon duplicates numbered above 100. The site already keeps your best copy of each card, your locked copies and copies on sale out of reach. Missions the tool does not know are left to you.
+`sell`, `exchange` and `recycle` only touch common and uncommon duplicates numbered above 100. The site already keeps your best copy of each card, your locked copies and copies on sale out of reach. Missions that progress on their own (pulls, new cards, mini-games, quiz) need nothing more.
 
 ### Missions to check
 
-At the end of the nightly routine, `oshibot` looks at the missions still open. Those it cannot finish (a mission it does not know, or one that failed) are posted to Discord in one "Missions to check" message. Missions that move forward on their own are left alone: daily pulls and new cards, and a card listed on the market. Weekly ones are reported on their last day if they are still open.
+At the end of the routine, `oshibot` looks at the missions still open. Those it cannot finish, a mission it does not know or one that failed, are posted to Discord in one "Missions to check" message. Weekly missions that progress on their own, and a card still waiting for a buyer, are reported on their last day if still open.
 
-No message means every mission is either done or handled.
+**No message means every mission is done or on its way.**
 
-### Claiming
+### Rewards
 
-Missions are claimed when they are finished, whoever finished them. `oshibot` checks the missions page after the games, then every two to four hours after a pack session. It does not do the missions that need a real choice from you, such as bidding at an auction.
+With `CLAIM_MISSIONS=1`, the routine also visits the games, pass, achievements and "my anime" pages, and claims what is waiting there: the weekly boss reward (100 gems per defeated boss), season pass tiers including the bonus ones after tier 30, unlocked achievements and completed anime.
 
-With `CLAIM_MISSIONS=1`, once a day it also visits the games, pass, achievements and "my anime" pages and claims what is waiting there: the weekly boss reward (100 gems per defeated boss), season pass tiers including the bonus ones after tier 30, unlocked achievements, and completed anime. What was claimed appears in the daily recap.
+Games played without mistakes every day, and rewards claimed within hours, are a stronger automation signal than opening packs. Leave all of this off if you want to stay discreet.
 
-Games played without mistakes every day, and rewards claimed within hours, are a stronger automation signal than opening packs. Leave both off if you want to stay discreet.
+## 🔔 Discord
+
+Set a webhook with `oshibot webhook <url>` (Discord > channel > Edit > Integrations > Webhooks > New Webhook > Copy Webhook URL), and try it with `oshibot webhook test`.
+
+| Message | When |
+|---|---|
+| A card with its art | as soon as it is pulled, for the rarities in `NOTIFY_RARITIES` (legendary and mythic by default) |
+| 🌙 Daily recap | after the nightly routine: yesterday's packs and rarities, mythic pulls, mini-game results, missions done and claimed, rewards, login streak |
+| ⚠️ Missions to check | after the routine, only when a mission needs you |
+| "Who is it?" needs you | when the quiz picture matches no card clearly enough |
+| Stopped, session lost | when the tool stops itself |
+
+`oshibot recap preview` prints the recap without posting it. `DAILY_RECAP=0` turns it off.
+
+## ⌨️ Commands
+
+| Command | What it does |
+|---|---|
+| `oshibot setup` | Guided setup: account, play style, Discord, service |
+| `oshibot cookie [file]` | Connect your account, with a step by step guide |
+| `oshibot browser [file]` | Save your browser's identity without changing the session |
+| `oshibot profile [preset]` | Show your profile, or draw a new one, keeping your settings |
+| `oshibot webhook <url>` | Set the Discord webhook (`test` to try it, `off` to remove it) |
+| `oshibot open [n] [pack]` | Play one session now: empty the free stock, or `n` packs at most |
+| `oshibot packs` | List the site's packs, their cost and availability, and which ones you open |
+| `oshibot games [name...] [free]` | Play today's mini-games now (`free` replays without reward) |
+| `oshibot missions` | Do and claim the missions now |
+| `oshibot routine` | Run the nightly routine now: games, missions, rewards, recap |
+| `oshibot recap [preview]` | Post the recap now, or print it without posting |
+| `oshibot friend [username]` | List your friends, or pick the one for the message mission |
+| `oshibot pause <duration>` | Stop playing for a while: `3d`, `12h`, `45m` |
+| `oshibot resume` | Cancel a pause, or restart after a safety stop |
+| `oshibot status` | Account, profile, stock, games, routine, next session, today's pulls |
+| `oshibot stats` | Packs and rarities over the last 7 days |
+| `oshibot install` / `uninstall` | Add or remove the systemd service |
+| `oshibot logs` | Follow the service logs |
+| `oshibot run` | Run the loop in the foreground, without systemd |
+
+## ⚙️ Settings
+
+Everything lives in the `profile` file next to the script. It is plain Bash variables, you can edit it freely, and `git pull` never touches it. Run `oshibot profile <preset>` to redraw the schedule: your other settings are kept.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `PACKS` | `standard` | Packs to open, in order of preference |
+| `USE_BONUS` | `1` | Also open bonus boosters once the free stock is empty |
+| `DAILY_LOGIN` | `1` | Claim the daily login reward |
+| `PLAY_GAMES` | empty | Mini-games of the routine: `anime rarer memory quiz` |
+| `DO_MISSIONS` | empty | Missions to do: `banner wishlist chat auction sell exchange recycle` |
+| `CLAIM_MISSIONS` | `0` | Claim finished missions and the other rewards (missions alone are also claimed when `DO_MISSIONS` is set) |
+| `MISSION_FRIEND` | empty | Who gets the message of the friend mission |
+| `AUCTION_MAX_GEMS` | `50` | The most gems a mission bid may engage |
+| `ROUTINE_FROM`, `ROUTINE_TO` | `00:01`, `01:00` | Window of the nightly routine, Paris time |
+| `NOTIFY_RARITIES` | `["legendary","mythic"]` | Rarities posted to Discord as they are pulled |
+| `DAILY_RECAP` | `1` | Post the nightly recap |
+| `CURL_BIN` | `curl` | Another curl build, such as curl-impersonate (untested) |
+
+The schedule settings above them (gaps, night, pauses) are drawn by the preset and commented in the file. Pack session times use the machine's timezone; the routine and the mini-games follow Paris time.
 
 ## 🛑 Safety stop
 
 The tool halts itself, and tells you on Discord, when:
 
-- a page of the site, the open call or a game answers `403` or `429`,
+- a page of the site, the open call or an action answers `403` or `429`,
 - the pack page keeps answering something unexpected three sessions in a row,
 - the open call returns an error it does not know, or a response it cannot read,
 - a pack is paid with gems instead of a free booster.
@@ -256,7 +283,7 @@ It then refuses to play until you have checked your account in a browser and run
 
 Two cases are handled differently:
 
-- **Expired session.** Before stopping on an unknown answer, the tool checks whether its session is still valid. If not, it asks you to run `oshibot cookie` again instead.
+- **Expired session.** Before stopping on an unknown answer, the tool checks whether its session is still valid. If not, it asks you to run `oshibot cookie` again.
 - **Network and server errors** (`5xx`). The session is simply retried later.
 
 ## 📁 Files
@@ -269,18 +296,18 @@ Everything lives next to the script and is ignored by git:
 | `device.json` | Browser identity, presence key and device cookies |
 | `profile` | Your schedule and settings |
 | `config` | Discord webhook URL |
-| `history.tsv` | One line per opened pack, used by `stats` |
+| `history.tsv` | One line per opened pack, used by `stats` and the recap |
 | `rarity.tsv` | Rarity and anime of every card the tool has seen, used by the mini-games |
+| `digest.tsv` | Events waiting for the next recap |
 | `state`, `pause`, `halted` | Runtime state |
 
 ## ⚠️ Limitations
 
-- **No guarantee against bans.** The schedule copies a human one, but requests still come from `curl` and from wherever you host the tool. A site that inspects TLS fingerprints or IP ranges can tell the difference. `CURL_BIN` in the profile lets you point to another curl build such as curl-impersonate; this is untested.
+- **No guarantee against bans.** The schedule copies a human one, but requests still come from `curl` and from wherever you host the tool. A site that inspects TLS fingerprints or IP ranges can tell the difference.
 - **Volume is a signal on its own.** Even a perfect schedule stands out if it opens 100 packs every single day. Pick the lowest preset you are happy with.
 - **This repository is public.** The site's admins can read it too.
-- **Sessions can be revoked.** If the site ends the session, the service stops and tells you on Discord. Run `oshibot cookie` again. See "The session keeps dying" below if it keeps happening.
-- **Free packs only.** Packs that cost gems (Prestige, Ultimate) are never opened, and neither is the weekly banner's daily booster.
-- **It can break at any time.** The tool relies on private endpoints observed in the browser. A site update may change them.
+- **Free packs only.** Packs that cost gems (Prestige, Ultimate, extra banner packs) are never opened.
+- **It can break at any time.** The tool relies on private endpoints observed in the browser. The server action ids are read again from the site's scripts after each update, but a deeper change may break a feature until the tool is updated.
 
 ## 🩹 The session keeps dying
 
@@ -296,11 +323,11 @@ The login you give to `oshibot` must belong to it alone:
 
 Your regular browser has its own login, so you can keep playing there. `oshibot cookie` warns you when the login you paste is more than 20 minutes old, which usually means it is shared with an open browser.
 
-## ⚙️ How it works
+## 🔧 How it works
 
 The web app opens a pack with a single `POST /api/open` call, authenticated by a Supabase session cookie. The tool rebuilds that cookie from a stored session, renews the access token through the Supabase auth API when it is about to expire, and replays the same call with a fresh `requestId` each time.
 
-The daily login reward is a Next.js server action that the site's pages call when they load. Its id changes with every site update, so `oshibot` reads it from the page's scripts and caches it until the site changes. Set `DAILY_LOGIN=0` in the profile to turn this off. The mini-games and the mission claims go through server actions of the same kind.
+Everything else (daily login, mini-games, missions, rewards, messages, bids, listings) goes through Next.js server actions, the functions the site's buttons call. Their ids change with every site update, so `oshibot` reads them from the page's scripts and caches them until the site changes. The page data itself (missions, game state, duplicates) is read from the stream Next.js embeds in each page.
 
 ## 📄 License
 

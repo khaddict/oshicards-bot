@@ -585,7 +585,7 @@ loot_payload() {
   jq -c --argjson rar "$NOTIFY_RARITIES" "$JQ_EDITION"'
     [.result.boosters[].cards[] | select(.rarity as $r | $rar | index($r))]
     | if length == 0 then empty else
-      {username: "Oshi", embeds: (.[:10] | map({
+      {username: "oshibot", embeds: (.[:10] | map({
         title: ((.rarity | ascii_upcase) + ": " + .name),
         description: (.series_title // ""),
         color: (if .rarity == "mythic" then 15680580 else 16096779 end),
@@ -867,7 +867,6 @@ series_of() {
 G_PLAY=""
 G_HTML=""
 G_PATH=""
-GAMES_SUMMARY=""
 pj() { jq -r "$1" <<<"$G_PLAY" 2>/dev/null; }
 
 # Opens the page of game $1 and gets today's rewarded play ready in G_PLAY ($2 = free: a replay
@@ -1075,7 +1074,6 @@ play_game() {
       if [[ -z $free ]]; then
         state_set "GAME_${game}_DAY" "$(paris_day)"
         state_set "GAME_${game}_RESULT" "$result"
-        GAMES_SUMMARY+="${GAMES_SUMMARY:+; }$game $result"
       fi
     fi
   fi
@@ -1097,7 +1095,6 @@ play_games() {
     esac
   done
   (( ${#list[@]} )) || read -r -a list <<<"${PLAY_GAMES:-anime rarer memory}"
-  GAMES_SUMMARY=""
   for g in "${list[@]}"; do
     [[ -z $free && $(state_get "GAME_${g}_DAY" "") == "$(paris_day)" ]] && continue
     (( first )) || sleep "$(rand 15 60)"
@@ -1110,8 +1107,7 @@ play_games() {
     fi
     (( rc >= 2 )) && break
   done
-  :
-  if (( rc == 0 && CLAIM_MISSIONS )) && [[ -z $free ]]; then
+  if (( rc == 0 )) && missions_on && [[ -z $free ]]; then
     sleep "$(rand 5 20)"
     claim_missions; rc=$?
   fi
@@ -1274,7 +1270,6 @@ play_quiz() {
     if [[ $(jq -r '.solved // .correct' <<<"$QUIZ_STATE") == true ]]; then
       state_set GAME_quiz_RESULT "$(jq -r '"found \(.answer.name // ""), +\(.gems // 0) gems"' <<<"$QUIZ_STATE")"
       ok "quiz: $(state_get GAME_quiz_RESULT "")"
-      GAMES_SUMMARY+="${GAMES_SUMMARY:+; }quiz $(state_get GAME_quiz_RESULT "")"
     else
       state_set GAME_quiz_RESULT "missed"
       warn "quiz: missed, the answer was $(jq -r '.answer.name // "?"' <<<"$QUIZ_STATE")"
@@ -1403,6 +1398,10 @@ mission_auction() {
 
 mission_sell() {
   local copy card num _r name price list
+  # a listing lasts 48 hours: wait for a buyer instead of listing another card
+  if (( $(state_get SELL_LISTED_UNTIL 0) > $(now) )); then
+    return 0
+  fi
   list=$(mktemp)
   spare_copies >"$list"
   IFS=$'\t' read -r copy card num _r name <"$list"
@@ -1419,6 +1418,7 @@ mission_sell() {
     rm -f "$PAGE_HTML"; warn "mission sell: listing refused (HTTP $ACT_STATUS $(jq -r '.error // empty' <<<"$ACT_BODY" 2>/dev/null))"; return 1
   fi
   rm -f "$PAGE_HTML"
+  state_set SELL_LISTED_UNTIL $(( $(now) + 48 * 3600 ))
   MISSION_DONE+="${MISSION_DONE:+, }$name #$num listed for $price gems"
 }
 
@@ -1545,7 +1545,7 @@ claim_missions() {
       visit_page "$path"; html=$PAGE_HTML
     fi
   fi
-  for code in $(grep -oP '\{\\"code\\":\\"\K[a-z0-9_]+(?=\\",\\"done\\":true,[^{}]*?\\"claimed\\":false)' "$html" | sort -u); do
+  for code in $(page_stream "$html" | grep -oP '\{"code":"\K[a-z0-9_]+(?=","done":true,[^{}]*?"claimed":false)' | sort -u); do
     idle "$(rand 1 4)"
     if ! call_action claimMissionAction "$path" "$(jq -nc --arg c "$code" '[$c]')" "$html"; then
       warn "mission $code: claim refused (HTTP $ACT_STATUS)"; continue
@@ -1558,6 +1558,7 @@ claim_missions() {
     [[ $g =~ ^[0-9]+$ ]] || g=0
     [[ $b =~ ^[0-9]+$ ]] || b=0
     ok "mission claimed: $code, +$g gems$( ((b > 0)) && echo ", +$b bonus booster(s)")"
+    [[ $code == *sell* ]] && state_set SELL_LISTED_UNTIL 0
     n=$((n + 1)); gems=$((gems + g)); bonus=$((bonus + b))
   done
   (( ROUTINE_RUN )) && missions_check "$html"
@@ -1637,7 +1638,8 @@ claim_rewards() {
   return 0
 }
 
-missions_due() { (( CLAIM_MISSIONS )) && (( $(now) >= $(state_get MISSIONS_NEXT 0) )); }
+missions_on() { (( CLAIM_MISSIONS )) || [[ -n $DO_MISSIONS ]]; }
+missions_due() { missions_on && (( $(now) >= $(state_get MISSIONS_NEXT 0) )); }
 
 # ---------- schedule ----------
 
@@ -1705,7 +1707,7 @@ pause_until() {
 
 # the daily recap, as one Discord embed: yesterday's packs, today's games, missions and rewards
 recap_payload() {
-  local d=$1 games="" g r mythics missions claimed rewards img streak
+  local d=$1 games="" g r mythics="" missions="" claimed="" rewards="" img="" streak
   load_stats
   for g in $PLAY_GAMES; do
     [[ $(state_get "GAME_${g}_DAY" "") == "$(paris_day)" ]] || continue
@@ -1783,9 +1785,10 @@ daily_routine() {
   state_set MISSIONS_DONE_AT 0
   if [[ -n $PLAY_GAMES ]]; then
     play_games; rc=$?
-  elif (( CLAIM_MISSIONS )); then
+  elif missions_on; then
     claim_missions; rc=$?
   fi
+  ROUTINE_RUN=0
   (( rc >= 2 )) && return $rc
   state_set ROUTINE_DONE "$(paris_day)"
   send_recap
@@ -1833,7 +1836,7 @@ cmd_run() {
       rat=$(routine_at)
       if (( rat <= target )); then
         (( rat < $(now) + 60 )) && rat=$(( $(now) + $(rand 60 300) ))
-        state_set NEXT "$rat"
+        state_set NEXT "$rat"; state_set NEXT_WHAT routine
         log "daily routine at $(date -d "@$rat" '+%a %H:%M') (in $(( (rat - $(now)) / 60 )) min)"
         sleep $(( rat - $(now) ))
         (( $(pause_until) > $(now) )) && continue
@@ -1852,7 +1855,7 @@ cmd_run() {
         continue
       fi
     fi
-    state_set NEXT "$target"
+    state_set NEXT "$target"; state_set NEXT_WHAT session
     log "next session at $(date -d "@$target" '+%a %H:%M') (in $(( (target - $(now)) / 60 )) min)$( ((SLEEP_MIN > 0)) && echo ", night from $(date -d "@$BED" +%H:%M) to $(date -d "@$WAKE" +%H:%M)")$( ((DAY_FACTOR > 10)) && echo ', light day')"
     gap=$(( target - $(now) ))
     sleep $(( gap > 0 ? gap : 0 ))
@@ -1890,7 +1893,7 @@ restart_service() {
 # when run with sudo, hand the data files back to the owner of the directory
 fix_owner() {
   (( EUID == 0 )) || return 0
-  chown -f "$(stat -c %U:%G "$DIR")" "$SESSION" "$DEVICE" "$PROFILE" "$CONFIG" "$STATE" "$HISTORY" "$PAUSE" "$HALT" "$LOCK" 2>/dev/null
+  chown -f "$(stat -c %U:%G "$DIR")" "$SESSION" "$DEVICE" "$PROFILE" "$CONFIG" "$STATE" "$HISTORY" "$DIGEST" "$RARITIES" "$PAUSE" "$HALT" "$LOCK" 2>/dev/null
   return 0
 }
 
@@ -2001,7 +2004,7 @@ EOF
       ;;
     test)
       [[ -z $WEBHOOK ]] && die "no webhook configured"
-      discord_send "$(loot_payload '{"result":{"boosters":[{"cards":[{"name":"Test card","rarity":"legendary","serial":1,"series_title":"oshibot webhook test","image_url":"https://s4.anilist.co/file/anilistcdn/character/large/3437.jpg","is_new":true,"variant":null}]}]}}')"
+      discord_send "$(NOTIFY_RARITIES='["mythic"]' loot_payload '{"result":{"boosters":[{"cards":[{"name":"Test card","rarity":"mythic","serial":1,"series_title":"oshibot webhook test","image_url":"https://s4.anilist.co/file/anilistcdn/character/large/3437.jpg","is_new":true,"variant":null}]}]}}')"
       [[ $HTTP_STATUS == 2* ]] && ok "test message sent"
       ;;
     off)
@@ -2140,7 +2143,8 @@ cmd_status() {
     done
     echo "Games   : $line"
   fi
-  (( CLAIM_MISSIONS )) && echo "Missions: claimed automatically, next check $(n=$(state_get MISSIONS_NEXT 0); ((n > $(now))) && date -d "@$n" +%H:%M || echo "at the next session")"
+  missions_on && echo "Missions: $([[ -n $DO_MISSIONS ]] && echo "done and claimed" || echo "claimed") automatically, next check $(n=$(state_get MISSIONS_NEXT 0); ((n > $(now))) && date -d "@$n" +%H:%M || echo "at the next session")"
+  echo "Routine : $([[ $(state_get ROUTINE_DONE "") == "$(paris_day)" ]] && echo "${GRN}done today${R}, next one between $ROUTINE_FROM and $ROUTINE_TO" || echo "today between $ROUTINE_FROM and $ROUTINE_TO (Paris time)")"
   echo "Webhook : $([[ -n $WEBHOOK ]] && echo "${GRN}configured${R}" || echo "${YEL}not configured${R} (run: oshibot webhook <url>)")"
   if [[ -f $UNIT ]]; then
     echo "Service : $(systemctl is-active "$SERVICE" 2>/dev/null)"
@@ -2152,7 +2156,7 @@ cmd_status() {
   (( pu > $(now) )) && echo "${YEL}Paused${R}  : until $(date -d "@$pu" '+%a %d %b %H:%M') (run: oshibot resume)"
   next=$(state_get NEXT 0)
   if [[ -f $UNIT ]] && (( next > $(now) )); then
-    echo "Next    : session at $(date -d "@$next" '+%a %H:%M')$( ((SLEEP_MIN > 0)) && echo ", night from $(date -d "@$(state_get BED 0)" +%H:%M) to $(date -d "@$(state_get WAKE 0)" +%H:%M)")$([[ $(state_get LIGHT 0) == 1 ]] && echo ', light day')"
+    echo "Next    : $(state_get NEXT_WHAT session) at $(date -d "@$next" '+%a %H:%M')$( ((SLEEP_MIN > 0)) && echo ", night from $(date -d "@$(state_get BED 0)" +%H:%M) to $(date -d "@$(state_get WAKE 0)" +%H:%M)")$([[ $(state_get LIGHT 0) == 1 ]] && echo ', light day')"
   fi
   load_stats
   echo "Today   : $(recap_line "$(date +%F)")"
@@ -2235,7 +2239,7 @@ cmd_help() {
     ${c}oshibot setup${R}                 guided setup, runs the four steps below for you
      ${d}├─${R} ${c}oshibot cookie${R}            ${d}1.${R} connect your account
      ${d}├─${R} ${c}oshibot profile${R} <preset>  ${d}2.${R} pick a play style: chill, regular, grinder, nonstop
-     ${d}├─${R} ${c}oshibot webhook${R} <url>     ${d}3.${R} Discord alerts for legendary and mythic pulls
+     ${d}├─${R} ${c}oshibot webhook${R} <url>     ${d}3.${R} Discord: rare pulls, alerts, nightly recap
      ${d}└─${R} ${c}oshibot install${R}           ${d}4.${R} start the background service
 
   ${B}${YEL}EVERY DAY${R}
@@ -2281,7 +2285,9 @@ main() {
     games) ensure_profile; locked play_games "$@" ;;
     missions) ensure_profile; locked claim_missions ;;
     routine) ensure_profile; locked daily_routine ;;
-    recap) ensure_profile; d=$(date -d yesterday +%F); [[ ${1:-} == preview ]] && recap_payload "$d" | jq . || send_recap ;;
+    recap)
+      ensure_profile
+      if [[ ${1:-} == preview ]]; then recap_payload "$(date -d yesterday +%F)" | jq .; else send_recap; fi ;;
     pause) cmd_pause "$@" ;;
     resume) cmd_resume ;;
     stats) cmd_stats ;;
