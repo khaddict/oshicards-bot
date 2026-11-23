@@ -1364,7 +1364,11 @@ mission_chat() {
   if [[ -z $MISSION_FRIEND ]]; then
     warn "mission chat: no friend set (run: oshibot friend <username>)"; return 1
   fi
-  msg=$(shuf -n1 -e "salut !" "yo" "hello" "ça va ?" "bonne journée" "wesh" "coucou" "gg pour tes tirages")
+  msg=$(shuf -n1 -e "Coucou ! Je t'envoie ce petit message pour ma quête quotidienne 😄" \
+    "Hello, petit message pour valider ma quête du jour, bonne journée !" \
+    "Salut ! C'est pour ma quête quotidienne, j'espère que tes tirages sont bons 🍀" \
+    "Coucou, je passe juste pour ma mission du jour, bon jeu !" \
+    "Hey ! Message de quête quotidienne, désolé pour le spam 😅")
   visit_page "/$LOCALE/friends/$MISSION_FRIEND"
   [[ $PAGE_CODE == 200 ]] || { rm -f "$PAGE_HTML"; warn "mission chat: conversation with $MISSION_FRIEND unreachable ($PAGE_CODE)"; return 1; }
   idle "$(rand 5 15)"
