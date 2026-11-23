@@ -50,7 +50,7 @@
 - 📅 **Daily login streak.** Claims the daily login reward the way the site's pages do when they load, so the first session of the day collects it.
 - 🎯 **Daily mini-games (opt-in).** Plays "Mystery anime", "Rarer?", "Memory pairs" and the "Who is it?" quiz once a day, with random pauses between answers.
 - ✅ **Missions and rewards (opt-in).** Does most daily and weekly missions, claims them as soon as they are finished, and once a day the weekly boss reward, season pass tiers, achievements and completed anime.
-- 🔔 **Discord notifications.** Legendary and mythic pulls with the card art, a daily recap, mini-game scores, claimed missions, and an alert if the tool stops.
+- 🔔 **Discord notifications, kept quiet.** Legendary and mythic pulls with the card art, and an alert when the tool stops or needs you. Everything else (mini-games, missions, rewards) is gathered into one recap a day.
 
 ## 📋 Requirements
 
@@ -231,7 +231,7 @@ AUCTION_MAX_GEMS=50
 
 Missions are claimed when they are finished, whoever finished them. `oshibot` checks the missions page after the games, then every two to four hours after a pack session. It does not do the missions that need a real choice from you, such as bidding at an auction.
 
-With `CLAIM_MISSIONS=1`, once a day it also visits the games, pass, achievements and "my anime" pages and claims what is waiting there: the weekly boss reward (100 gems per defeated boss), season pass tiers including the bonus ones after tier 30, unlocked achievements, and completed anime. Each claim is reported on Discord.
+With `CLAIM_MISSIONS=1`, once a day it also visits the games, pass, achievements and "my anime" pages and claims what is waiting there: the weekly boss reward (100 gems per defeated boss), season pass tiers including the bonus ones after tier 30, unlocked achievements, and completed anime. What was claimed appears in the daily recap.
 
 Games played without mistakes every day, and rewards claimed within hours, are a stronger automation signal than opening packs. Leave both off if you want to stay discreet.
 

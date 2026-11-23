@@ -10,3 +10,4 @@ halted
 *.tmp
 *.har
 rarity.tsv
+digest.tsv
