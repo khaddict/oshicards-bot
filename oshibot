@@ -1487,6 +1487,36 @@ do_missions() {
   return 0
 }
 
+# After the routine: missions still open that the tool will not finish by itself are sent to
+# Discord, so that no message means everything is handled. Missions that progress on their own
+# (pulls, new cards, games) and a card waiting for a buyer are only reported on their last day.
+ROUTINE_RUN=0
+missions_check() {
+  local html=$1 list line period kind name left last todo=""
+  list=$(page_stream "$html" | grep -oP '"period":"(daily|weekly)","missions":\[.*?\],"resets_at":"[^"]+"' |
+    sed -E 's/^/{/; s/$/}/' | jq -c '.period as $p | .resets_at as $r | .missions[] | select(.done | not)
+      | {p: $p, kind, name, left: (.target - .progress), progress, target, last: (($r | sub("\\.[0-9]+"; "") | sub("[+]00:00$"; "Z") | fromdateiso8601) - now < 86400)}' 2>/dev/null)
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    period=$(jq -r .p <<<"$line"); kind=$(jq -r .kind <<<"$line"); name=$(jq -r .name <<<"$line"); last=$(jq -r .last <<<"$line")
+    case $kind in
+      pull_* | new* | open* | volume* | games* | login*)
+        # packs and games keep them moving: daily ones finish during the day
+        [[ $period == weekly && $last == true ]] || continue ;;
+      market_sell | *sell*)
+        [[ " $DO_MISSIONS " == *" sell "* && $last != true ]] && continue ;;
+      quiz)
+        continue ;;
+    esac
+    todo+="• **$([[ $period == daily ]] && echo Daily || echo Weekly)** · $name ($(jq -r '"\(.progress)/\(.target)"' <<<"$line"))$([[ $last == true && $period == weekly ]] && echo " · last day")"$'\n'
+  done <<<"$list"
+  if [[ -n $todo ]]; then
+    warn "missions to check: $(tr '\n' ' ' <<<"$todo")"
+    discord_send "$(jq -nc --arg t "${todo%$'\n'}" '{username: "oshibot", embeds: [{title: "⚠️ Missions to check", color: 16096779,
+      description: ($t + "\n\noshibot could not finish these. Everything else is handled.")}]}')"
+  fi
+}
+
 # ---------- missions ----------
 
 # claims every mission that is finished and not claimed yet. 0 = ok, 2 = dead session, 3 = safety stop
@@ -1530,6 +1560,7 @@ claim_missions() {
     ok "mission claimed: $code, +$g gems$( ((b > 0)) && echo ", +$b bonus booster(s)")"
     n=$((n + 1)); gems=$((gems + g)); bonus=$((bonus + b))
   done
+  (( ROUTINE_RUN )) && missions_check "$html"
   rm -f "$html"
   sleep "$(rand 5 20)"
   claim_rewards || return $?
@@ -1748,6 +1779,8 @@ routine_pending() { [[ $(state_get ROUTINE_DONE "") != "$(paris_day)" ]]; }
 daily_routine() {
   local rc=0
   log "${B}daily routine${R}"
+  ROUTINE_RUN=1
+  state_set MISSIONS_DONE_AT 0
   if [[ -n $PLAY_GAMES ]]; then
     play_games; rc=$?
   elif (( CLAIM_MISSIONS )); then

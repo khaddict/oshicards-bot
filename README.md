@@ -229,6 +229,12 @@ AUCTION_MAX_GEMS=50
 
 `sell`, `exchange` and `recycle` only touch common and uncommon duplicates numbered above 100. The site already keeps your best copy of each card, your locked copies and copies on sale out of reach. Missions the tool does not know are left to you.
 
+### Missions to check
+
+At the end of the nightly routine, `oshibot` looks at the missions still open. Those it cannot finish (a mission it does not know, or one that failed) are posted to Discord in one "Missions to check" message. Missions that move forward on their own are left alone: daily pulls and new cards, and a card listed on the market. Weekly ones are reported on their last day if they are still open.
+
+No message means every mission is either done or handled.
+
 ### Claiming
 
 Missions are claimed when they are finished, whoever finished them. `oshibot` checks the missions page after the games, then every two to four hours after a pack session. It does not do the missions that need a real choice from you, such as bidding at an auction.
