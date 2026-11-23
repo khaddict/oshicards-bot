@@ -1214,7 +1214,7 @@ play_quiz() {
   for ((n = 0; n < 3; n++)); do
     [[ $(jq -r .finished <<<"$QUIZ_STATE") == true || -n $(jq -r '.hint // empty' <<<"$QUIZ_STATE") ]] && break
     (( $(jq -r '.max_tries - .tries' <<<"$QUIZ_STATE") > 1 )) || break
-    junk=$(shuf -n1 -e "je sais pas" "aucune idée" "hmm" "?" "jsp" "pas la moindre idée")
+    junk=$(shuf -n1 -e Sakura Yuki Hinata Kenji Aiko Haruto Mei Takeshi Rin Sora)
     idle "$(rand 4 12)"
     quiz_guess "$junk"; rc=$?
     (( rc == 3 )) && { rm -f "$QUIZ_HTML"; return 3; }
@@ -1392,10 +1392,11 @@ mission_auction() {
   MISSION_DONE+="${MISSION_DONE:+, }bid $price gems on $name"
 }
 
+# $1 = mission kind: market_list only asks for a listing, a sale mission waits for the buyer
 mission_sell() {
   local copy card num _r name price list
   # a listing lasts 48 hours: wait for a buyer instead of listing another card
-  if (( $(state_get SELL_LISTED_UNTIL 0) > $(now) )); then
+  if [[ ${1:-} != market_list ]] && (( $(state_get SELL_LISTED_UNTIL 0) > $(now) )); then
     return 0
   fi
   list=$(mktemp)
@@ -1462,7 +1463,7 @@ mission_of() {
     banner | wishlist) echo "$1" ;;
     chat | message*) echo chat ;;
     *bid* | auction*) echo auction ;;
-    *sell*) echo sell ;;
+    market_list | *sell*) echo sell ;;
     exchange*) echo exchange ;;
     recycle*) echo recycle ;;
   esac
@@ -1477,7 +1478,11 @@ do_missions() {
   while IFS=$'\t' read -r kind left; do
     m=$(mission_of "$kind")
     [[ -n $m && " $DO_MISSIONS " == *" $m "* ]] || continue
-    if [[ $m == recycle ]]; then mission_recycle "$left"; else "mission_$m"; fi
+    case $m in
+      recycle) mission_recycle "$left" ;;
+      sell) mission_sell "$kind" ;;
+      *) "mission_$m" ;;
+    esac
     rc=$?
     (( rc == 3 )) && return 3
     sleep "$(rand 5 20)"
@@ -1511,6 +1516,7 @@ missions_check() {
         # the quiz already asked for help on Discord
         [[ $kind == quiz* && $(state_get QUIZ_ASKED "") == "$(paris_day)" ]] && continue ;;
       *sell*)
+        # a card waiting for a buyer
         [[ " $DO_MISSIONS " == *" sell "* && $last != true ]] && continue ;;
     esac
     todo+="• **$([[ $period == daily ]] && echo Daily || echo Weekly)** · $name ($(jq -r '"\(.progress)/\(.target)"' <<<"$line"))$([[ $last == true && $period == weekly ]] && echo " · last day")"$'\n'
