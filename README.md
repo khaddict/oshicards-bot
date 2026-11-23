@@ -49,7 +49,7 @@
 - 🔄 **Self-renewing session.** Paste your cookie once. The access token is refreshed automatically from then on.
 - 📅 **Daily login streak.** Claims the daily login reward the way the site's pages do when they load, so the first session of the day collects it.
 - 🎯 **Daily mini-games (opt-in).** Plays "Mystery anime", "Rarer?" and "Memory pairs" once a day, with random pauses between answers.
-- ✅ **Missions (opt-in).** Claims daily and weekly missions as soon as they are finished.
+- ✅ **Missions and rewards (opt-in).** Claims daily and weekly missions as soon as they are finished, and once a day the weekly boss reward, season pass tiers, achievements and completed anime.
 - 🔔 **Discord notifications.** Legendary and mythic pulls with the card art, a daily recap, mini-game scores, claimed missions, and an alert if the tool stops.
 
 ## 📋 Requirements
@@ -202,6 +202,8 @@ About "Rarer?":
 It is not perfect: a few classics are always Mythic on the site whatever their popularity. Those cards are learned the first time they come up, so the hit rate improves with time. In early testing, 27 rounds out of 28 were answered correctly over three games.
 
 Missions are claimed when they are finished, whoever finished them. `oshibot` checks the missions page after the games, then every two to four hours after a pack session. It does not do the missions that need a real choice from you, such as bidding at an auction.
+
+With `CLAIM_MISSIONS=1`, once a day it also visits the games, pass, achievements and "my anime" pages and claims what is waiting there: the weekly boss reward (100 gems per defeated boss), season pass tiers including the bonus ones after tier 30, unlocked achievements, and completed anime. Each claim is reported on Discord.
 
 Games played without mistakes every day, and rewards claimed within hours, are a stronger automation signal than opening packs. Leave both off if you want to stay discreet.
 

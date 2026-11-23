@@ -1137,12 +1137,78 @@ claim_missions() {
     n=$((n + 1)); gems=$((gems + g)); bonus=$((bonus + b))
   done
   rm -f "$html"
+  sleep "$(rand 5 20)"
+  claim_rewards || return $?
   if (( n > 0 )); then
     (( bonus > 0 )) && state_set BONUS $(( $(state_get BONUS 0) + bonus ))
     discord_text "Missions claimed: $n, +$gems gems$( ((bonus > 0)) && echo ", +$bonus bonus booster(s)")."
   else
     log "missions: nothing to claim"
   fi
+  return 0
+}
+
+# ---------- other rewards ----------
+
+REWARDS_SUMMARY=""
+
+# opens page $1, and when grep pattern $2 matches its data, calls action $3 with arguments $4.
+# $5 = label. Adds what was won to REWARDS_SUMMARY. 0 = ok, 3 = safety stop
+claim_on_page() {
+  local path=$1 pattern=$2 action=$3 args=$4 label=$5 html data r g b f
+  visit_page "$path"
+  html=$PAGE_HTML
+  case $PAGE_CODE in
+    200) ;;
+    403 | 429) rm -f "$html"; halt "the page $path answered HTTP $PAGE_CODE, the site may be blocking this tool"; return 3 ;;
+    *) rm -f "$html"; warn "$label: page unreachable ($PAGE_CODE)"; return 0 ;;
+  esac
+  data=$(page_stream "$html")
+  if ! grep -qP -- "$pattern" <<<"$data"; then
+    rm -f "$html"; return 0
+  fi
+  idle "$(rand 2 6)"
+  if ! call_action "$action" "$path" "$args" "$html"; then
+    rm -f "$html"
+    [[ $ACT_STATUS == 403 || $ACT_STATUS == 429 ]] && { halt "claiming $label answered HTTP $ACT_STATUS"; return 3; }
+    warn "$label: claim refused (HTTP $ACT_STATUS)"; return 0
+  fi
+  rm -f "$html"
+  r=$(jq -c '.result // .' <<<"$ACT_BODY" 2>/dev/null)
+  if [[ -n $(jq -r '.error // empty' <<<"$r" 2>/dev/null) ]]; then
+    warn "$label: $(jq -r .error <<<"$r")"; return 0
+  fi
+  g=$(jq -r '.gems // 0' <<<"$r" 2>/dev/null); b=$(jq -r '.bonus // 0' <<<"$r" 2>/dev/null); f=$(jq -r '.free // 0' <<<"$r" 2>/dev/null)
+  [[ $g =~ ^[0-9]+$ ]] || g=0
+  [[ $b =~ ^[0-9]+$ ]] || b=0
+  [[ $f =~ ^[0-9]+$ ]] || f=0
+  (( b > 0 )) && state_set BONUS $(( $(state_get BONUS 0) + b ))
+  label="$label: +$g gems$( ((b > 0)) && echo ", +$b bonus booster(s)")$( ((f > 0)) && echo ", free stock +$f")"
+  ok "claimed $label"
+  REWARDS_SUMMARY+="${REWARDS_SUMMARY:+; }$label"
+  return 0
+}
+
+# claims the rewards waiting outside missions: weekly boss, season pass, achievements, completed anime.
+# Once a day. 0 = ok, 2 = dead session, 3 = safety stop
+claim_rewards() {
+  local rc
+  (( CLAIM_MISSIONS )) || return 0
+  [[ $(state_get REWARDS_DAY "") == "$(paris_day)" ]] && return 0
+  load_browser
+  ensure_session; rc=$?
+  (( rc == 2 )) && return 2
+  (( rc == 1 )) && return 0
+  REWARDS_SUMMARY=""
+  claim_on_page "/$LOCALE/games" '"claimable":\{"gems":\d+,"count":[1-9]' gameBossClaimAction '[]' "weekly boss" || return 3
+  sleep "$(rand 3 10)"
+  claim_on_page "/$LOCALE/pass" '"me":\{.*?"claimed":(\d+),"reached":(?!\1[,}])\d+|"repeat_claimed":(\d+),"repeat_reached":(?!\2[,}])\d+' claimPassAction '[null]' "season pass" || return 3
+  sleep "$(rand 3 10)"
+  claim_on_page "/$LOCALE/achievements" '"claimable":true' claimAchievementsAction '[]' "achievements" || return 3
+  sleep "$(rand 3 10)"
+  claim_on_page "/$LOCALE/collection/anime" '"franchiseId":null,"count":[1-9]' claimAnimeAction '[null]' "completed anime" || return 3
+  state_set REWARDS_DAY "$(paris_day)"
+  [[ -n $REWARDS_SUMMARY ]] && discord_text "Rewards claimed: $REWARDS_SUMMARY."
   return 0
 }
 
