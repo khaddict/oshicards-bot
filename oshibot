@@ -552,19 +552,23 @@ discord_text() {
   discord_send "$(jq -nc --arg c "$1" '{username:"oshibot", content:$c}')"
 }
 
+# event editions have no copy number: their name comes from the variant code (rivals_2026 -> Rivals)
+JQ_EDITION='def edition: if (.variant | type) == "object" and .variant.code then
+  (.variant.code | sub("_[0-9]{4}"; "") | gsub("_"; " ") | (.[:1] | ascii_upcase) + .[1:]) else null end;'
+
 loot_payload() {
-  jq -c --argjson rar "$NOTIFY_RARITIES" '
+  jq -c --argjson rar "$NOTIFY_RARITIES" "$JQ_EDITION"'
     [.result.boosters[].cards[] | select(.rarity as $r | $rar | index($r))]
     | if length == 0 then empty else
       {username: "Oshi", embeds: (.[:10] | map({
         title: ((.rarity | ascii_upcase) + ": " + .name),
         description: (.series_title // ""),
         color: (if .rarity == "mythic" then 15680580 else 16096779 end),
-        thumbnail: {url: .image_url},
-        fields: ([
-          {name: "Serial", value: "#\(.serial // "?")", inline: true},
-          {name: "New", value: (if .is_new then "yes" else "no" end), inline: true}
-        ] + (if .variant then [{name: "Variant", value: (.variant | tostring), inline: true}] else [] end))
+        thumbnail: {url: ((.variant | objects | .image) // .image_url)},
+        fields: (
+          (if .serial then [{name: "Serial", value: "#\(.serial)\(if .total then " / \(.total)" else "" end)", inline: true}] else [] end)
+          + (if edition then [{name: "Edition", value: edition, inline: true}] else [] end)
+          + [{name: "New", value: (if .is_new then "yes" else "no" end), inline: true}])
       }))}
     end' <<<"$1"
 }
@@ -616,7 +620,7 @@ recap_line() {
 # ---------- opening ----------
 
 print_cards() {
-  jq -r '.result.boosters[].cards[] | "\(.rarity)\t\(.name)\t\((.series_title // "")[:50])\t\(if .is_new then "NEW" else "" end)"' <<<"$1" |
+  jq -r "$JQ_EDITION"'.result.boosters[].cards[] | "\(.rarity)\t\(.name)\(if edition then " [\(edition)]" else "" end)\t\((.series_title // "")[:50])\t\(if .is_new then "NEW" else "" end)"' <<<"$1" |
   while IFS=$'\t' read -r rar name series new; do
     local c=$DIM
     case $rar in
