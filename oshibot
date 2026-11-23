@@ -610,7 +610,10 @@ halt() {
 # unexpected answer: tell a dead session (2) apart from a refusal by the site (3)
 stop_or_expired() {
   refresh_session "$(jq -r .refresh_token "$SESSION")"
-  (( $? == 2 )) && return 2
+  case $? in
+    1) warn "$1, network unavailable to check the session, postponed"; return 0 ;;
+    2) return 2 ;;
+  esac
   halt "$1"
   return 3
 }
@@ -1180,7 +1183,7 @@ quiz_guess() {
 # otherwise you get the candidates on Discord. 0 = done or skipped, 2 = dead session, 3 = safety stop
 QUIZ_HTML=""
 play_quiz() {
-  local rc today tries hint slug dir html list match name dist second ratio n junk played=0
+  local rc today tries hint slug dir html match name second ratio n junk played=0
   today=$(paris_day)
   python3 -I -c 'import PIL' 2>/dev/null || { warn "quiz: Pillow is missing (apt install python3-pil), skipped"; return 0; }
   [[ -f $HALT ]] && { err "stopped earlier: $(<"$HALT") (run: ${B}oshibot resume${R})"; return 3; }
@@ -1249,7 +1252,7 @@ play_quiz() {
     match=""
     [[ -s $dir/list && -s $dir/quiz ]] && match=$(quiz_match "$dir/quiz" "$dir/list" 2>/dev/null)
     rm -rf "$dir"
-    IFS=$'\t' read -r name dist second ratio <<<"$match"
+    IFS=$'\t' read -r name _ second ratio <<<"$match"
     if [[ -z $name ]] || ! awk -v r="${ratio:-0}" 'BEGIN { exit !(r >= 2) }'; then
       state_set QUIZ_ASKED "$today"
       warn "quiz: not sure (${name:-no candidate}${second:+ or $second}), left for you"
@@ -1271,9 +1274,8 @@ play_quiz() {
       state_set GAME_quiz_RESULT "$(jq -r '"found \(.answer.name // ""), +\(.gems // 0) gems"' <<<"$QUIZ_STATE")"
       ok "quiz: $(state_get GAME_quiz_RESULT "")"
     else
-      state_set GAME_quiz_RESULT "missed"
-      warn "quiz: missed, the answer was $(jq -r '.answer.name // "?"' <<<"$QUIZ_STATE")"
-      discord_text "\"Who is it?\" was missed today: the answer was $(jq -r '.answer.name // "?"' <<<"$QUIZ_STATE"). The streak starts over."
+      state_set GAME_quiz_RESULT "missed, it was $(jq -r '.answer.name // "?"' <<<"$QUIZ_STATE")"
+      warn "quiz: $(state_get GAME_quiz_RESULT "")"
     fi
   fi
   return 0
@@ -1303,12 +1305,6 @@ spare_copies() {
   page_stream "$SPARE_HTML" | grep -oP '"candidates":\K\{.*?\}(?=,"cardBack")' | head -1 |
     jq -r '("common", "uncommon") as $r | (.[$r] // [])[] | . as $c | .copies[] | select(.print_no > 100)
       | [.id, $c.card_id, .print_no, $r, $c.name] | @tsv' 2>/dev/null | shuf
-}
-
-# the rarity of each spare copy, read from the same page
-spare_rarity() {
-  page_stream "$SPARE_HTML" | grep -oP '"candidates":\K\{.*?\}(?=,"cardBack")' | head -1 |
-    jq -r --arg r "$1" '(.[$r] // [])[] | .copies[] | select(.print_no > 100) | .id' 2>/dev/null
 }
 
 mission_banner() {
@@ -1423,9 +1419,11 @@ mission_sell() {
 }
 
 mission_exchange() {
-  local ids
-  spare_copies >/dev/null
-  ids=$(spare_rarity common | shuf | head -5 | jq -Rn '[inputs | tonumber]')
+  local ids list
+  list=$(mktemp)
+  spare_copies >"$list"
+  ids=$(awk -F'\t' '$4 == "common" { print $1 }' "$list" | head -5 | jq -Rn '[inputs | tonumber]')
+  rm -f "$list"
   if (( $(jq length <<<"$ids") < 5 )); then
     rm -f "$SPARE_HTML"; warn "mission exchange: fewer than 5 spare commons"; return 1
   fi
@@ -1458,23 +1456,28 @@ mission_recycle() {
   MISSION_DONE+="${MISSION_DONE:+, }$n duplicates recycled (+$gems gems)"
 }
 
+# the DO_MISSIONS name of mission kind $1, empty when oshibot cannot do it
+mission_of() {
+  case $1 in
+    banner | wishlist) echo "$1" ;;
+    chat | message*) echo chat ;;
+    *bid* | auction*) echo auction ;;
+    *sell*) echo sell ;;
+    exchange*) echo exchange ;;
+    recycle*) echo recycle ;;
+  esac
+}
+
 # does the unfinished missions listed in DO_MISSIONS, from the missions page saved in $1
 MISSION_DONE=""
 do_missions() {
-  local html=$1 line kind left rc
+  local html=$1 kind left m rc
   [[ -n $DO_MISSIONS ]] || return 0
   MISSION_DONE=""
   while IFS=$'\t' read -r kind left; do
-    case $kind in
-      banner) [[ " $DO_MISSIONS " == *" banner "* ]] || continue; mission_banner ;;
-      wishlist) [[ " $DO_MISSIONS " == *" wishlist "* ]] || continue; mission_wishlist ;;
-      chat | message*) [[ " $DO_MISSIONS " == *" chat "* ]] || continue; mission_chat ;;
-      *bid* | auction*) [[ " $DO_MISSIONS " == *" auction "* ]] || continue; mission_auction ;;
-      market_sell | *sell*) [[ " $DO_MISSIONS " == *" sell "* ]] || continue; mission_sell ;;
-      exchange*) [[ " $DO_MISSIONS " == *" exchange "* ]] || continue; mission_exchange ;;
-      recycle*) [[ " $DO_MISSIONS " == *" recycle "* ]] || continue; mission_recycle "$left" ;;
-      *) continue ;;
-    esac
+    m=$(mission_of "$kind")
+    [[ -n $m && " $DO_MISSIONS " == *" $m "* ]] || continue
+    if [[ $m == recycle ]]; then mission_recycle "$left"; else "mission_$m"; fi
     rc=$?
     (( rc == 3 )) && return 3
     sleep "$(rand 5 20)"
@@ -1489,7 +1492,7 @@ do_missions() {
 
 # After the routine: missions still open that the tool will not finish by itself are sent to
 # Discord, so that no message means everything is handled. Missions that progress on their own
-# (pulls, new cards, games) and a card waiting for a buyer are only reported on their last day.
+# (pulls, new cards) are skipped, weekly ones and a card waiting for a buyer until their last day.
 ROUTINE_RUN=0
 missions_check() {
   local html=$1 list line period kind name left last todo=""
@@ -1500,13 +1503,15 @@ missions_check() {
     [[ -n $line ]] || continue
     period=$(jq -r .p <<<"$line"); kind=$(jq -r .kind <<<"$line"); name=$(jq -r .name <<<"$line"); last=$(jq -r .last <<<"$line")
     case $kind in
-      pull_* | new* | open* | volume* | games* | login*)
-        # packs and games keep them moving: daily ones finish during the day
+      pull_* | new* | open* | volume* | login*)
+        # packs keep them moving: daily ones finish during the day
         [[ $period == weekly && $last == true ]] || continue ;;
-      market_sell | *sell*)
+      games* | quiz* | memory* | anime* | rarer*)
+        [[ $period == weekly && $last != true ]] && continue
+        # the quiz already asked for help on Discord
+        [[ $kind == quiz* && $(state_get QUIZ_ASKED "") == "$(paris_day)" ]] && continue ;;
+      *sell*)
         [[ " $DO_MISSIONS " == *" sell "* && $last != true ]] && continue ;;
-      quiz)
-        continue ;;
     esac
     todo+="• **$([[ $period == daily ]] && echo Daily || echo Weekly)** · $name ($(jq -r '"\(.progress)/\(.target)"' <<<"$line"))$([[ $last == true && $period == weekly ]] && echo " · last day")"$'\n'
   done <<<"$list"
@@ -1750,11 +1755,12 @@ recap_payload() {
     }]}'
 }
 
+# the day the recap is about: yesterday, Paris time
+recap_day() { date -d "$(paris_day) -1 day" +%F; }
+
 send_recap() {
   (( DAILY_RECAP )) && [[ -n $WEBHOOK ]] || return 0
-  local d
-  d=$(date -d "@$(( $(now) - 86400 ))" +%F)
-  discord_send "$(recap_payload "$d")"
+  discord_send "$(recap_payload "$(recap_day)")"
   [[ $HTTP_STATUS == 2* ]] && rm -f "$DIGEST"
   return 0
 }
@@ -2287,7 +2293,7 @@ main() {
     routine) ensure_profile; locked daily_routine ;;
     recap)
       ensure_profile
-      if [[ ${1:-} == preview ]]; then recap_payload "$(date -d yesterday +%F)" | jq .; else send_recap; fi ;;
+      if [[ ${1:-} == preview ]]; then recap_payload "$(recap_day)" | jq .; else send_recap; fi ;;
     pause) cmd_pause "$@" ;;
     resume) cmd_resume ;;
     stats) cmd_stats ;;

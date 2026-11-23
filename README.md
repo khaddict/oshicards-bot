@@ -201,7 +201,7 @@ The site caps the mini-games at 50 gems a day in total, "Who is it?" excepted. "
 
 ### Missions to check
 
-At the end of the routine, `oshibot` looks at the missions still open. Those it cannot finish, a mission it does not know or one that failed, are posted to Discord in one "Missions to check" message. Weekly missions that progress on their own, and a card still waiting for a buyer, are reported on their last day if still open.
+At the end of the routine, `oshibot` looks at the missions still open. Those it cannot finish, a mission it does not know or one that failed, are posted to Discord in one "Missions to check" message. Daily missions that pulls finish during the day (new cards, epic pulls) are left out. A mini-game or quiz mission still open after the games is reported, unless the quiz already asked for your help. Weekly missions that progress on their own, and a card still waiting for a buyer, are reported on their last day if still open.
 
 **No message means every mission is done or on its way.**
 
