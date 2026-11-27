@@ -1807,6 +1807,14 @@ daily_routine() {
   return 0
 }
 
+# ends the loop on a dead session (2) or a safety stop (3)
+loop_stop() {
+  case $1 in
+    2) discord_text "oshibot lost its oshicards session: $(session_dead_reason)"; exit 2 ;;
+    3) exit 3 ;;
+  esac
+}
+
 cmd_run() {
   local gap target first=1 last want pu fill rc rat
   ensure_profile
@@ -1853,10 +1861,12 @@ cmd_run() {
         sleep $(( rat - $(now) ))
         (( $(pause_until) > $(now) )) && continue
         locked daily_routine; rc=$?
-        case $rc in
-          2) discord_text "oshibot lost its oshicards session: $(session_dead_reason)"; exit 2 ;;
-          3) exit 3 ;;
-        esac
+        # the stock filled up while waiting for the routine: open it before going on
+        if (( rc == 0 )); then
+          sleep "$(rand 20 90)"
+          locked_session "$(max_packs)"; rc=$?
+        fi
+        loop_stop "$rc"
         continue
       fi
     else
@@ -1880,12 +1890,7 @@ cmd_run() {
       sleep "$(rand 5 30)"
       locked claim_missions; rc=$?
     fi
-    case $rc in
-      2)
-        discord_text "oshibot lost its oshicards session: $(session_dead_reason)"
-        exit 2 ;;
-      3) exit 3 ;;
-    esac
+    loop_stop "$rc"
   done
 }
 

@@ -160,7 +160,7 @@ Every night, at a random time between `ROUTINE_FROM` and `ROUTINE_TO` (00:01 and
 3. claims the other rewards: weekly boss, season pass tiers, achievements, completed anime,
 4. posts the recap on Discord.
 
-It runs even during the night break of your preset. `oshibot routine` runs it right away. During the day, missions are still checked and claimed every two to four hours, after a pack session.
+It runs even during the night break of your preset, and ends with a pack session that opens the whole stock, which filled up while waiting for it. `oshibot routine` runs it right away. During the day, missions are still checked and claimed every two to four hours, after a pack session.
 
 ```bash
 PLAY_GAMES="anime rarer memory quiz"
